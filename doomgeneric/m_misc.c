@@ -31,7 +31,7 @@
 #ifdef _MSC_VER
 #include <direct.h>
 #endif
-#else
+#elif !defined(__AMDGPU__) && !defined(__NVPTX__)
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
@@ -56,6 +56,11 @@ void M_MakeDirectory(char *path)
 {
 #ifdef _WIN32
     mkdir(path);
+#elif defined(__AMDGPU__) || defined(__NVPTX__)
+    // Calling system(...) with a runtime string, what could go wrong?
+    char buffer[256] = "mkdir ";
+    strncat(buffer, path, sizeof(buffer) - strlen(buffer) - 1);
+    system(buffer);
 #else
     mkdir(path, 0755);
 #endif

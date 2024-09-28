@@ -29,6 +29,7 @@
 #include "deh_main.h"
 #include "doomdef.h"
 #include "doomstat.h"
+#include "gpu_utils.h"
 
 #include "dstrings.h"
 #include "doomfeatures.h"
@@ -166,6 +167,11 @@ extern  boolean setsizeneeded;
 extern  int             showMessages;
 void R_ExecuteSetViewSize (void);
 
+// These are shared between the threads in the block.
+int Local wipestart [[clang::loader_uninitialized]];
+boolean Local wipe [[clang::loader_uninitialized]];
+boolean Local done [[clang::loader_uninitialized]];
+
 void D_Display (void)
 {
     static  boolean		viewactivestate = false;
@@ -176,127 +182,127 @@ void D_Display (void)
     static  int			borderdrawcount;
     int				nowtime;
     int				tics;
-    int				wipestart;
     int				y;
-    boolean			done;
-    boolean			wipe;
     boolean			redrawsbar;
 
     if (nodrawers)
     	return;                    // for comparative timing / profiling
 		
-    redrawsbar = false;
-    
-    // change the view size if needed
-    if (setsizeneeded)
-    {
-		R_ExecuteSetViewSize ();
-		oldgamestate = -1;                      // force background redraw
-		borderdrawcount = 3;
+    if (get_thread_id() == 0) {
+      redrawsbar = false;
+      
+      // change the view size if needed
+      if (setsizeneeded)
+      {
+      R_ExecuteSetViewSize ();
+      oldgamestate = -1;                      // force background redraw
+      borderdrawcount = 3;
+      }
+
+      // save the current screen if about to wipe
+      if (gamestate != wipegamestate)
+      {
+      wipe = true;
+      wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
+      }
+      else
+        wipe = false;
+
+      if (gamestate == GS_LEVEL && gametic)
+        HU_Erase();
+      
+      // do buffered drawing
+      switch (gamestate)
+      {
+        case GS_LEVEL:
+      if (!gametic)
+        break;
+      if (automapactive)
+        AM_Drawer ();
+      if (wipe || (viewheight != 200 && fullscreen) )
+        redrawsbar = true;
+      if (inhelpscreensstate && !inhelpscreens)
+        redrawsbar = true;              // just put away the help screen
+      ST_Drawer (viewheight == 200, redrawsbar );
+      fullscreen = viewheight == 200;
+      break;
+
+        case GS_INTERMISSION:
+      WI_Drawer ();
+      break;
+
+        case GS_FINALE:
+      F_Drawer ();
+      break;
+
+        case GS_DEMOSCREEN:
+      D_PageDrawer ();
+      break;
+      }
+      
+      // draw buffered stuff to screen
+      I_UpdateNoBlit ();
+      
+      // draw the view directly
+      if (gamestate == GS_LEVEL && !automapactive && gametic)
+        R_RenderPlayerView (&players[displayplayer]);
+
+      if (gamestate == GS_LEVEL && gametic)
+        HU_Drawer ();
+      
+      // clean up border stuff
+      if (gamestate != oldgamestate && gamestate != GS_LEVEL)
+        I_SetPalette (W_CacheLumpName (DEH_String("PLAYPAL"),PU_CACHE));
+
+      // see if the border needs to be initially drawn
+      if (gamestate == GS_LEVEL && oldgamestate != GS_LEVEL)
+      {
+      viewactivestate = false;        // view was not active
+      R_FillBackScreen ();    // draw the pattern into the back screen
+      }
+
+      // see if the border needs to be updated to the screen
+      if (gamestate == GS_LEVEL && !automapactive && scaledviewwidth != 320)
+      {
+      if (menuactive || menuactivestate || !viewactivestate)
+        borderdrawcount = 3;
+      if (borderdrawcount)
+      {
+        R_DrawViewBorder ();    // erase old menu stuff
+        borderdrawcount--;
+      }
+      }
+
+      if (testcontrols)
+      {
+          // Box showing current mouse speed
+
+          V_DrawMouseSpeedBox(testcontrols_mousespeed);
+      }
+
+      menuactivestate = menuactive;
+      viewactivestate = viewactive;
+      inhelpscreensstate = inhelpscreens;
+      oldgamestate = wipegamestate = gamestate;
+      
+      // draw pause pic
+      if (paused)
+      {
+      if (automapactive)
+        y = 4;
+      else
+        y = viewwindowy+4;
+      V_DrawPatchDirect(viewwindowx + (scaledviewwidth - 68) / 2, y,
+                  W_CacheLumpName (DEH_String("M_PAUSE"), PU_CACHE));
+      }
+
+
+      // menus go directly to the screen
+      M_Drawer ();          // menu is drawn even on top of everything
+      NetUpdate ();         // send out any new accumulation
     }
 
-    // save the current screen if about to wipe
-    if (gamestate != wipegamestate)
-		{
-		wipe = true;
-		wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
-    }
-    else
-    	wipe = false;
-
-    if (gamestate == GS_LEVEL && gametic)
-    	HU_Erase();
-    
-    // do buffered drawing
-    switch (gamestate)
-    {
-      case GS_LEVEL:
-		if (!gametic)
-			break;
-		if (automapactive)
-			AM_Drawer ();
-		if (wipe || (viewheight != 200 && fullscreen) )
-			redrawsbar = true;
-		if (inhelpscreensstate && !inhelpscreens)
-			redrawsbar = true;              // just put away the help screen
-		ST_Drawer (viewheight == 200, redrawsbar );
-		fullscreen = viewheight == 200;
-		break;
-
-      case GS_INTERMISSION:
-		WI_Drawer ();
-		break;
-
-      case GS_FINALE:
-		F_Drawer ();
-		break;
-
-      case GS_DEMOSCREEN:
-		D_PageDrawer ();
-		break;
-    }
-    
-    // draw buffered stuff to screen
-    I_UpdateNoBlit ();
-    
-    // draw the view directly
-    if (gamestate == GS_LEVEL && !automapactive && gametic)
-    	R_RenderPlayerView (&players[displayplayer]);
-
-    if (gamestate == GS_LEVEL && gametic)
-    	HU_Drawer ();
-    
-    // clean up border stuff
-    if (gamestate != oldgamestate && gamestate != GS_LEVEL)
-    	I_SetPalette (W_CacheLumpName (DEH_String("PLAYPAL"),PU_CACHE));
-
-    // see if the border needs to be initially drawn
-    if (gamestate == GS_LEVEL && oldgamestate != GS_LEVEL)
-    {
-		viewactivestate = false;        // view was not active
-		R_FillBackScreen ();    // draw the pattern into the back screen
-    }
-
-    // see if the border needs to be updated to the screen
-    if (gamestate == GS_LEVEL && !automapactive && scaledviewwidth != 320)
-    {
-		if (menuactive || menuactivestate || !viewactivestate)
-			borderdrawcount = 3;
-		if (borderdrawcount)
-		{
-			R_DrawViewBorder ();    // erase old menu stuff
-			borderdrawcount--;
-		}
-    }
-
-    if (testcontrols)
-    {
-        // Box showing current mouse speed
-
-        V_DrawMouseSpeedBox(testcontrols_mousespeed);
-    }
-
-    menuactivestate = menuactive;
-    viewactivestate = viewactive;
-    inhelpscreensstate = inhelpscreens;
-    oldgamestate = wipegamestate = gamestate;
-    
-    // draw pause pic
-    if (paused)
-    {
-		if (automapactive)
-			y = 4;
-		else
-			y = viewwindowy+4;
-		V_DrawPatchDirect(viewwindowx + (scaledviewwidth - 68) / 2, y,
-							  W_CacheLumpName (DEH_String("M_PAUSE"), PU_CACHE));
-    }
-
-
-    // menus go directly to the screen
-    M_Drawer ();          // menu is drawn even on top of everything
-    NetUpdate ();         // send out any new accumulation
-
+    sync_threads();
 
     // normal update
     if (!wipe)
@@ -305,27 +311,34 @@ void D_Display (void)
 	return;
     }
     
-    // wipe update
-    wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
+    if (get_thread_id() == 0) {
+      // wipe update
+      wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
 
-    wipestart = I_GetTime () - 1;
+      wipestart = I_GetTime () - 1;
+    }
 
+    sync_threads();
+      do
+      {
     do
     {
-	do
-	{
-	    nowtime = I_GetTime ();
-	    tics = nowtime - wipestart;
-            I_Sleep(1);
-	} while (tics <= 0);
-        
-	wipestart = nowtime;
-	done = wipe_ScreenWipe(wipe_Melt
-			       , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
-	I_UpdateNoBlit ();
-	M_Drawer ();                            // menu is drawn even on top of wipes
-	I_FinishUpdate ();                      // page flip or blit buffer
-    } while (!done);
+        nowtime = I_GetTime ();
+        tics = nowtime - wipestart;
+              I_Sleep(1);
+    } while (tics <= 0);
+          
+    if (get_thread_id() == 0) {
+      wipestart = nowtime;
+      done = wipe_ScreenWipe(wipe_Melt
+                 , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
+      I_UpdateNoBlit ();
+      M_Drawer ();                            // menu is drawn even on top of wipes
+    }
+    sync_threads();
+    I_FinishUpdate ();                      // page flip or blit buffer
+      } while (!done);
+  sync_threads();
 }
 
 //
@@ -404,13 +417,17 @@ boolean D_GrabMouseCallback(void)
 
 void doomgeneric_Tick()
 {
-    // frame syncronous IO operations
-    I_StartFrame ();
+    if (get_thread_id() == 0) {
+      // frame syncronous IO operations
+      I_StartFrame ();
 
-    TryRunTics (); // will run at least one tic
+      TryRunTics (); // will run at least one tic
 
-    S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
+      S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
+    }
 
+    sync_threads();
+                                               
     // Update display, next frame, with current state.
     if (screenvisible)
     {

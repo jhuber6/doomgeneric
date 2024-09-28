@@ -18,7 +18,9 @@
 #include <ctype.h>
 #include <math.h>
 #include <string.h>
+#if !defined(__AMDGPU__) && !defined(__NVPTX__)
 #include <fcntl.h>
+#endif
 #include <stdio.h>
 
 #include "config.h"

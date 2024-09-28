@@ -5,11 +5,11 @@
 #include <stdint.h>
 
 #ifndef DOOMGENERIC_RESX
-#define DOOMGENERIC_RESX 640
+#define DOOMGENERIC_RESX 2*640
 #endif  // DOOMGENERIC_RESX
 
 #ifndef DOOMGENERIC_RESY
-#define DOOMGENERIC_RESY 400
+#define DOOMGENERIC_RESY 2*400
 #endif  // DOOMGENERIC_RESY
 
 
@@ -28,7 +28,6 @@ extern pixel_t* DG_ScreenBuffer;
 
 void doomgeneric_Create(int argc, char **argv);
 void doomgeneric_Tick();
-
 
 //Implement below functions for your platform
 void DG_Init();
