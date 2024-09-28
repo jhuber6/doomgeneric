@@ -31,7 +31,7 @@
 #ifdef _MSC_VER
 #include <direct.h>
 #endif
-#else
+#elif !defined(__AMDGPU__) && !defined(__NVPTX__)
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
@@ -56,7 +56,7 @@ void M_MakeDirectory(char *path)
 {
 #ifdef _WIN32
     mkdir(path);
-#else
+#elif !defined(__AMDGPU__) && !defined(__NVPTX__)
     mkdir(path, 0755);
 #endif
 }

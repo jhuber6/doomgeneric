@@ -21,6 +21,8 @@
 #ifndef __DOOMTYPE__
 #define __DOOMTYPE__
 
+#include <stddef.h>
+
 // #define macros to provide functions missing in Windows.
 // Outside Windows, we use strings.h for str[n]casecmp.
 

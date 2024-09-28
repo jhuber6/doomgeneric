@@ -26,7 +26,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#else
+#elif !defined(__AMDGPU__) && !defined(__NVPTX__)
 #include <unistd.h>
 #endif
 
