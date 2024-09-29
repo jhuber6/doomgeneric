@@ -29,7 +29,11 @@ static void handle_input() {
   s_KeyQueueWriteIndex %= KEYQUEUE_SIZE;
 }
 
-void DG_Init() { key_buffer = malloc(sizeof(uint32_t)); }
+void DG_Init() {
+  uint32_t thread_id = get_thread_id();
+  if (thread_id == 0)
+    key_buffer = malloc(sizeof(uint32_t));
+}
 
 void DG_DrawFrame() {
   rpc_host_call(draw_framebuffer, &DG_ScreenBuffer, sizeof(void *));
@@ -66,15 +70,19 @@ int DG_GetKey(int *pressed, unsigned char *doomKey) {
 void DG_SetWindowTitle(const char *title) {}
 
 int main(int argc, char **argv, char **envp) {
-  uint32_t thread_id = 0;
-  if (thread_id == 0) {
+  if (get_thread_id() == 0)
     doomgeneric_Create(argc, argv);
+  sync_threads();
 
-    uint32_t time = DG_GetTicksMs();
-    uint32_t last_tick = 0;
-    for (int i = 0;; ++i) {
-
+  uint32_t time = DG_GetTicksMs();
+  uint32_t last_tick = 0;
+  for (int i = 0;; ++i) {
+    if (get_thread_id() == 0)
       doomgeneric_Tick();
+
+    doomgeneric_Draw();
+
+    if (get_thread_id() == 0) {
       int interval = 10;
       if (i % interval == 0) {
         uint32_t new_time = DG_GetTicksMs();

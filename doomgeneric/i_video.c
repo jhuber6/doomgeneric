@@ -25,12 +25,13 @@
 static const char
 rcsid[] = "$Id: i_x.c,v 1.6 1997/02/03 22:45:10 b1 Exp $";
 
+#include "i_video.h"
 #include "config.h"
-#include "v_video.h"
-#include "m_argv.h"
 #include "d_event.h"
 #include "d_main.h"
-#include "i_video.h"
+#include "gpu_utils.h"
+#include "m_argv.h"
+#include "v_video.h"
 #include "z_zone.h"
 
 #include "tables.h"
@@ -153,30 +154,39 @@ void cmap_to_rgb565(uint16_t * out, uint8_t * in, int in_pixels)
     }
 }
 
-void cmap_to_fb(uint8_t * out, uint8_t * in, int in_pixels)
+void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels, boolean multi_threaded)
 {
     int i, j, k;
     struct color c;
     uint32_t pix;
     uint16_t r, g, b;
 
-    for (i = 0; i < in_pixels; i++)
+    uint32_t thrd_id = get_thread_id_x();
+    uint32_t thrd_count = get_num_threads_x();
+    for (i = 0; i < in_pixels; i += multi_threaded ? thrd_count : 1)
     {
-        c = colors[*in];  /* R:8 G:8 B:8 format! */
-        r = (uint16_t)(c.r >> (8 - s_Fb.red.length));
-        g = (uint16_t)(c.g >> (8 - s_Fb.green.length));
-        b = (uint16_t)(c.b >> (8 - s_Fb.blue.length));
+        int local_id = i + thrd_id;
+        if (local_id >= in_pixels)
+            break;
+        uint8_t *in_current = in + local_id;
+        c = colors[*in_current]; /* R:8 G:8 B:8 format! */
+        r = (uint16_t) (c.r >> (8 - s_Fb.red.length));
+        g = (uint16_t) (c.g >> (8 - s_Fb.green.length));
+        b = (uint16_t) (c.b >> (8 - s_Fb.blue.length));
         pix = r << s_Fb.red.offset;
         pix |= g << s_Fb.green.offset;
         pix |= b << s_Fb.blue.offset;
 
-        for (k = 0; k < fb_scaling; k++) {
-            for (j = 0; j < s_Fb.bits_per_pixel/8; j++) {
-                *out = (pix >> (j*8));
-                out++;
+        uint32_t bytes_pp = s_Fb.bits_per_pixel / 8;
+        uint8_t *out_current = out + local_id * fb_scaling * bytes_pp;
+        for (k = 0; k < fb_scaling; k++)
+        {
+            for (j = 0; j < bytes_pp; j++)
+            {
+                *out_current = (pix >> (j * 8));
+                out_current++;
             }
         }
-        in++;
     }
 }
 
@@ -264,7 +274,7 @@ void I_UpdateNoBlit (void)
 // I_FinishUpdate
 //
 
-void I_FinishUpdate (void)
+void I_FinishUpdate (boolean multi_threaded)
 {
     int y;
     int x_offset, y_offset, x_offset_end;
@@ -305,14 +315,16 @@ void I_FinishUpdate (void)
             }
 #else
             //cmap_to_rgb565((void*)line_out, (void*)line_in, SCREENWIDTH);
-            cmap_to_fb((void*)line_out, (void*)line_in, SCREENWIDTH);
+            cmap_to_fb((void*)line_out, (void*)line_in, SCREENWIDTH, multi_threaded);
 #endif
             line_out += (SCREENWIDTH * fb_scaling * (s_Fb.bits_per_pixel/8)) + x_offset_end;
         }
         line_in += SCREENWIDTH;
     }
 
-	DG_DrawFrame();
+    if (get_thread_id() == 0)
+      DG_DrawFrame();
+    sync_threads();
 }
 
 //

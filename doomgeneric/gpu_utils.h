@@ -108,7 +108,7 @@ static inline uint32_t get_lane_size() {
 }
 
 // Copies the value from the first active thread in the wavefront to the rest.
-[[clang::convergent]] static inline uint32_t broadcast_value(uint64_t,
+[[clang::convergent]] static inline uint32_t broadcast_value(uint64_t mask,
                                                              uint32_t x) {
   return __builtin_amdgcn_readfirstlane(x);
 }
@@ -133,13 +133,13 @@ static inline uint32_t get_lane_size() {
 }
 
 // Wait for all threads in the wavefront to converge, this is a noop on AMDGPU.
-[[clang::convergent]] static inline void sync_lane(uint64_t) {
+[[clang::convergent]] static inline void sync_lane(uint64_t mask) {
   __builtin_amdgcn_wave_barrier();
 }
 
 // Shuffles the the lanes inside the wavefront according to the given index.
-[[clang::convergent]] static inline uint32_t shuffle(uint64_t, uint32_t idx,
-                                                     uint32_t x) {
+[[clang::convergent]] static inline uint32_t shuffle(uint64_t mask,
+                                                     uint32_t idx, uint32_t x) {
   return __builtin_amdgcn_ds_bpermute(idx << 2, x);
 }
 
