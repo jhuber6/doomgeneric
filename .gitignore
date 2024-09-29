@@ -8,7 +8,6 @@
 *.map
 *.wad
 amdgpu-loader
-doomgeneric
 *.cache/
 build/
 *~
