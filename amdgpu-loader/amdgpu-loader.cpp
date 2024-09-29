@@ -47,6 +47,12 @@
 #include <llvmlibc_rpc_opcodes.h>
 #include <llvmlibc_rpc_server.h>
 
+#include <SDL2/SDL.h>
+#include <sys/mman.h>
+
+#include "doomgeneric.h"
+#include "doomkeys.h"
+
 using namespace llvm;
 
 static cl::OptionCategory loader_category("loader options");
@@ -318,6 +324,7 @@ template <typename args_t>
 hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
                            hsa_amd_memory_pool_t kernargs_pool,
                            hsa_amd_memory_pool_t coarsegrained_pool,
+                           hsa_amd_memory_pool_t finegrained_pool,
                            hsa_queue_t *queue, rpc_device_t device,
                            const LaunchParameters &params,
                            const char *kernel_name, args_t kernel_args,
@@ -328,7 +335,8 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
           executable, kernel_name, &dev_agent, &symbol))
     return err;
 
-  // Register RPC callbacks for the malloc and free functions on HSA.
+  // Register RPC callbacks for the malloc and free functions on HSA. This uses
+  // paged memory to make it easier to pass things from the GPU.
   auto tuple = std::make_tuple(dev_agent, coarsegrained_pool);
   rpc_register_callback(
       device, RPC_MALLOC,
@@ -336,12 +344,33 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
         auto malloc_handler = [](rpc_buffer_t *buffer, void *data) -> void {
           auto &[dev_agent, pool] = *static_cast<decltype(tuple) *>(data);
           uint64_t size = buffer->data[0];
-          void *dev_ptr = nullptr;
+          auto *dev_ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+          hsa_amd_svm_attribute_pair_t attrs[] = {
+              {HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE,
+               __builtin_bit_cast(uint64_t, dev_agent)}};
+
           if (hsa_status_t err =
-                  hsa_amd_memory_pool_allocate(pool, size,
-                                               /*flags=*/0, &dev_ptr))
-            dev_ptr = nullptr;
-          hsa_amd_agents_allow_access(1, &dev_agent, nullptr, dev_ptr);
+                  hsa_amd_svm_attributes_set(dev_ptr, size, attrs,
+                                             /*attribute_count=*/1))
+            handle_error(err);
+
+          hsa_signal_t signal;
+          if (hsa_status_t err = hsa_signal_create(1, 0, nullptr, &signal))
+            handle_error(err);
+
+          if (hsa_status_t err = hsa_amd_svm_prefetch_async(
+                  dev_ptr, size, dev_agent,
+                  /*num_dep_signals=*/0, nullptr, signal))
+            handle_error(err);
+
+          while (hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_EQ, 0,
+                                           UINT64_MAX,
+                                           HSA_WAIT_STATE_ACTIVE) != 0)
+            ;
+
+          if (hsa_status_t err = hsa_signal_destroy(signal))
+            handle_error(err);
           buffer->data[0] = reinterpret_cast<uintptr_t>(dev_ptr);
         };
         rpc_recv_and_send(port, malloc_handler, data);
@@ -351,9 +380,7 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
       device, RPC_FREE,
       [](rpc_port_t port, void *data) {
         auto free_handler = [](rpc_buffer_t *buffer, void *) {
-          if (hsa_status_t err = hsa_amd_memory_pool_free(
-                  reinterpret_cast<void *>(buffer->data[0])))
-            handle_error(err);
+          /* no-op for now */
         };
         rpc_recv_and_send(port, free_handler, data);
       },
@@ -495,9 +522,140 @@ static hsa_status_t hsa_memcpy(void *dst, hsa_agent_t dst_agent,
   return HSA_STATUS_SUCCESS;
 }
 
-int load(int argc, const char **argv, const char **envp, void *image,
-         size_t size, const LaunchParameters &params,
-         bool print_resource_usage) {
+static SDL_Window *window = nullptr;
+static SDL_Renderer *renderer = nullptr;
+static SDL_Texture *texture = nullptr;
+
+static unsigned char convertToDoomKey(unsigned int key) {
+  switch (key) {
+  case SDLK_RETURN:
+    key = KEY_ENTER;
+    break;
+  case SDLK_ESCAPE:
+    key = KEY_ESCAPE;
+    break;
+  case SDLK_LEFT:
+    key = KEY_LEFTARROW;
+    break;
+  case SDLK_RIGHT:
+    key = KEY_RIGHTARROW;
+    break;
+  case SDLK_UP:
+    key = KEY_UPARROW;
+    break;
+  case SDLK_DOWN:
+    key = KEY_DOWNARROW;
+    break;
+  case SDLK_LCTRL:
+  case SDLK_RCTRL:
+    key = KEY_FIRE;
+    break;
+  case SDLK_SPACE:
+    key = KEY_USE;
+    break;
+  case SDLK_LSHIFT:
+  case SDLK_RSHIFT:
+    key = KEY_RSHIFT;
+    break;
+  case SDLK_LALT:
+  case SDLK_RALT:
+    key = KEY_LALT;
+    break;
+  case SDLK_F2:
+    key = KEY_F2;
+    break;
+  case SDLK_F3:
+    key = KEY_F3;
+    break;
+  case SDLK_F4:
+    key = KEY_F4;
+    break;
+  case SDLK_F5:
+    key = KEY_F5;
+    break;
+  case SDLK_F6:
+    key = KEY_F6;
+    break;
+  case SDLK_F7:
+    key = KEY_F7;
+    break;
+  case SDLK_F8:
+    key = KEY_F8;
+    break;
+  case SDLK_F9:
+    key = KEY_F9;
+    break;
+  case SDLK_F10:
+    key = KEY_F10;
+    break;
+  case SDLK_F11:
+    key = KEY_F11;
+    break;
+  case SDLK_EQUALS:
+  case SDLK_PLUS:
+    key = KEY_EQUALS;
+    break;
+  case SDLK_MINUS:
+    key = KEY_MINUS;
+    break;
+  default:
+    key = tolower(key);
+    break;
+  }
+
+  return key;
+}
+
+static void init_sdl_windows() {
+  if (SDL_Init(SDL_INIT_VIDEO))
+    handle_error(SDL_GetError());
+
+  window =
+      SDL_CreateWindow("DOOM", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                       DOOMGENERIC_RESX, DOOMGENERIC_RESY, SDL_WINDOW_SHOWN);
+
+  renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+  SDL_RenderClear(renderer);
+  SDL_RenderPresent(renderer);
+
+  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB888,
+                              SDL_TEXTUREACCESS_TARGET, DOOMGENERIC_RESX,
+                              DOOMGENERIC_RESY);
+}
+
+// Function pointer the RPC implementation will call.
+static void sdl_get_input(void *args) {
+  uint32_t *key = *reinterpret_cast<uint32_t **>(args);
+
+  SDL_Event e;
+  while (SDL_PollEvent(&e)) {
+    if (e.type == SDL_QUIT) {
+      puts("Quit requested");
+      atexit(SDL_Quit);
+      exit(1);
+    }
+    unsigned char doom_key = convertToDoomKey(e.key.keysym.sym);
+    if (e.type == SDL_KEYDOWN)
+      *key = 1u << 8 | doom_key;
+    else if (e.type == SDL_KEYUP)
+      *key = doom_key;
+  }
+}
+
+// Function pointer the RPC implementation will call.
+static void sdl_draw(void *args) {
+  void *screen_buffer = *reinterpret_cast<void **>(args);
+  SDL_UpdateTexture(texture, NULL, screen_buffer,
+                    DOOMGENERIC_RESX * sizeof(uint32_t));
+
+  SDL_RenderClear(renderer);
+  SDL_RenderCopy(renderer, texture, NULL, NULL);
+  SDL_RenderPresent(renderer);
+}
+
+static int load(int argc, const char **argv, const char **envp, void *image,
+                size_t size, const LaunchParameters &params,
+                bool print_resource_usage) {
   // Initialize the HSA runtime used to communicate with the device.
   if (hsa_status_t err = hsa_init())
     handle_error(err);
@@ -691,6 +849,65 @@ int load(int argc, const char **argv, const char **envp, void *image,
                                         host_agent, sizeof(uint64_t)))
         handle_error(err);
     }
+
+    if (hsa_status_t err = hsa_amd_memory_pool_free(host_clock_freq))
+      handle_error(err);
+  }
+
+  // Copy the SDL renderer function to the GPU so it can be invoked via RPC.
+  hsa_executable_symbol_t draw_sym;
+  if (HSA_STATUS_SUCCESS ==
+      hsa_executable_get_symbol_by_name(executable, "draw_framebuffer",
+                                        &dev_agent, &draw_sym)) {
+
+    void *draw_function;
+    if (hsa_status_t err =
+            hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(void *),
+                                         /*flags=*/0, &draw_function))
+      handle_error(err);
+    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, draw_function);
+
+    *reinterpret_cast<void **>(draw_function) =
+        reinterpret_cast<void *>(sdl_draw);
+    void *draw_addr;
+    if (hsa_status_t err = hsa_executable_symbol_get_info(
+            draw_sym, HSA_EXECUTABLE_SYMBOL_INFO_VARIABLE_ADDRESS, &draw_addr))
+      handle_error(err);
+
+    if (hsa_status_t err = hsa_memcpy(draw_addr, dev_agent, draw_function,
+                                      host_agent, sizeof(void *)))
+      handle_error(err);
+
+    if (hsa_status_t err = hsa_amd_memory_pool_free(draw_function))
+      handle_error(err);
+  }
+
+  // Copy the SDL input function to the GPU so it can be invoked via RPC.
+  hsa_executable_symbol_t input_sym;
+  if (HSA_STATUS_SUCCESS ==
+      hsa_executable_get_symbol_by_name(executable, "get_input", &dev_agent,
+                                        &input_sym)) {
+
+    void **input_function;
+    if (hsa_status_t err = hsa_amd_memory_pool_allocate(
+            finegrained_pool, sizeof(void *),
+            /*flags=*/0, reinterpret_cast<void **>(&input_function)))
+      handle_error(err);
+    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, input_function);
+
+    *input_function = reinterpret_cast<void *>(sdl_get_input);
+    void *input_addr;
+    if (hsa_status_t err = hsa_executable_symbol_get_info(
+            input_sym, HSA_EXECUTABLE_SYMBOL_INFO_VARIABLE_ADDRESS,
+            &input_addr))
+      handle_error(err);
+
+    if (hsa_status_t err = hsa_memcpy(input_addr, dev_agent, input_function,
+                                      host_agent, sizeof(void *)))
+      handle_error(err);
+
+    if (hsa_status_t err = hsa_amd_memory_pool_free(input_function))
+      handle_error(err);
   }
 
   // Obtain a queue with the maximum (power of two) size, used to send commands
@@ -707,16 +924,17 @@ int load(int argc, const char **argv, const char **envp, void *image,
 
   LaunchParameters single_threaded_params = {1, 1, 1, 1, 1, 1};
   begin_args_t init_args = {argc, dev_argv, dev_envp};
-  if (hsa_status_t err = launch_kernel(dev_agent, executable, kernargs_pool,
-                                       coarsegrained_pool, queue, device,
-                                       single_threaded_params, "_begin.kd",
-                                       init_args, print_resource_usage))
+  if (hsa_status_t err = launch_kernel(
+          dev_agent, executable, kernargs_pool, coarsegrained_pool,
+          finegrained_pool, queue, device, single_threaded_params, "_begin.kd",
+          init_args, print_resource_usage))
     handle_error(err);
 
   start_args_t args = {argc, dev_argv, dev_envp, dev_ret};
-  if (hsa_status_t err = launch_kernel(
-          dev_agent, executable, kernargs_pool, coarsegrained_pool, queue,
-          device, params, "_start.kd", args, print_resource_usage))
+  if (hsa_status_t err =
+          launch_kernel(dev_agent, executable, kernargs_pool,
+                        coarsegrained_pool, finegrained_pool, queue, device,
+                        params, "_start.kd", args, print_resource_usage))
     handle_error(err);
 
   void *host_ret;
@@ -734,10 +952,10 @@ int load(int argc, const char **argv, const char **envp, void *image,
   int ret = *static_cast<int *>(host_ret);
 
   end_args_t fini_args = {ret};
-  if (hsa_status_t err = launch_kernel(dev_agent, executable, kernargs_pool,
-                                       coarsegrained_pool, queue, device,
-                                       single_threaded_params, "_end.kd",
-                                       fini_args, print_resource_usage))
+  if (hsa_status_t err = launch_kernel(
+          dev_agent, executable, kernargs_pool, coarsegrained_pool,
+          finegrained_pool, queue, device, single_threaded_params, "_end.kd",
+          fini_args, print_resource_usage))
     handle_error(err);
 
   if (rpc_status_t err = rpc_server_shutdown(
@@ -800,6 +1018,8 @@ int main(int argc, const char **argv, const char **envp) {
       report_error(createStringError("Failed to lock '%s': %s", argv[0],
                                      strerror(errno)));
   }
+
+  init_sdl_windows();
 
   // Drop the loader from the program arguments.
   LaunchParameters params{threads_x, threads_y, threads_z,

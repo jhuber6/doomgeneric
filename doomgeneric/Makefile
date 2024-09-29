@@ -14,7 +14,7 @@ endif
 
 TRIPLE=amdgcn-amd-amdhsa
 CC=clang
-CFLAGS+= -Os --target=$(TRIPLE) -mcpu=native -flto -nogpulib -fno-builtin-printf -fconvergent-functions
+CFLAGS+= -O1 --target=$(TRIPLE) -mcpu=native -flto -nogpulib -fno-builtin-printf -fconvergent-functions
 LDFLAGS+=-Wl,--gc-sections
 CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE # -DUSEASM
 LIBS+=-lm -lc $(shell dirname $(shell which $(CC)))/../lib/${TRIPLE}/crt1.o

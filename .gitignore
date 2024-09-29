@@ -4,6 +4,13 @@
 *.DS_Store
 *.log
 *.user
+*.json
+*.map
+*.wad
+amdgpu-loader
+doomgeneric
+*.cache/
+build/
 *~
 .vs/
 Debug/
