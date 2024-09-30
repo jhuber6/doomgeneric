@@ -7,9 +7,9 @@ library for GPUs](https://libc.llvm.org/gpu/) based on the
 To try it you will need a WAD file (game data). If you don't own the game,
 shareware version is freely available (doom1.wad).
 
-This implementation currently only works on AMD GPUs, support for NVIDIA will
-require a port of the facilities in the loader. This is also really hacky and
-will likely change in the future.
+This implementation works on NVIDIA as well as AMDGPU. Do use the NVIDIA
+implementation perform the same steps but with the `nvptx` loader and make
+target.
 
 # requirements
 
@@ -17,7 +17,7 @@ will likely change in the future.
 * An AMDGPU with ROCm support
 * SDL2 libraries
 * A ROCm or ROCR-Runtime installation
-* An LLVM build off of the main branch
+* An LLVM build off of the main branch (LLVM20 as of writing)
 
 # why
 
@@ -46,6 +46,10 @@ Once installed, use the newly built `clang` compiler to build the libraries.
 Make sure that you have `include/hsa.h` and `libhsa-runtime64.so` available from
 your ROCm installation.
 
+This currently only works with a single block / workgroup on the GPU. Logic is
+all done singe-threaded but software rendering is distributed amongst the
+threads.
+
 ```console
 $ make -C amdgpu_loader/ -j
 $ make -C doomgeneric/ -f Makefile.amdgpu -j
@@ -54,4 +58,11 @@ $ ./amdgpu-loader/amdgpu-loader --threads 512 ./doomgeneric/doomgeneric -iwad do
 
 ![AMDGPU](screenshots/amdgpu.png)
 
-Thanks to @hardcode84 for porting help.
+Thanks to [@hardcode84](https://github.com/hardcode84) for porting help.
+
+# hardware
+
+The system I tested this on has:
+* Arch Linux with kernel 6.10.5
+* AMD ATI Radeon RX 6950 XT GPU
+* ROCm version 6.0
