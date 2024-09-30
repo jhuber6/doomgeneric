@@ -16,19 +16,6 @@
 
 uint32_t *key_buffer = NULL;
 
-#define KEYQUEUE_SIZE 16
-
-static unsigned short s_KeyQueue[KEYQUEUE_SIZE];
-static unsigned int s_KeyQueueWriteIndex = 0;
-static unsigned int s_KeyQueueReadIndex = 0;
-
-static void handle_input() {
-  rpc_host_call(get_input, &key_buffer, sizeof(uint32_t *));
-  s_KeyQueue[s_KeyQueueWriteIndex] = *key_buffer;
-  s_KeyQueueWriteIndex++;
-  s_KeyQueueWriteIndex %= KEYQUEUE_SIZE;
-}
-
 void DG_Init() {
   uint32_t thread_id = get_thread_id();
   if (thread_id == 0)
@@ -37,7 +24,6 @@ void DG_Init() {
 
 void DG_DrawFrame() {
   rpc_host_call(draw_framebuffer, &DG_ScreenBuffer, sizeof(void *));
-  handle_input();
 }
 
 void DG_SleepMs(uint32_t ms) {
@@ -54,15 +40,12 @@ uint32_t DG_GetTicksMs() {
 }
 
 int DG_GetKey(int *pressed, unsigned char *doomKey) {
-  if (s_KeyQueueReadIndex == s_KeyQueueWriteIndex)
+  rpc_host_call(get_input, &key_buffer, sizeof(uint32_t *));
+  if (*key_buffer == 0)
     return 0;
 
-  unsigned short keyData = s_KeyQueue[s_KeyQueueReadIndex];
-  s_KeyQueueReadIndex++;
-  s_KeyQueueReadIndex %= KEYQUEUE_SIZE;
-
-  *pressed = keyData >> 8;
-  *doomKey = keyData & 0xFF;
+  *pressed = *key_buffer >> 8;
+  *doomKey = *key_buffer & 0xFF;
 
   return 1;
 }

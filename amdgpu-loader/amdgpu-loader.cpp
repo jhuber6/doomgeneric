@@ -336,7 +336,9 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
     return err;
 
   // Register RPC callbacks for the malloc and free functions on HSA. This uses
-  // paged memory to make it easier to pass things from the GPU.
+  // paged memory to make it easier to pass things from the GPU, this isn't
+  // strictly necessary and I don't bother freeing the memory since it's
+  // bounded.
   auto tuple = std::make_tuple(dev_agent, coarsegrained_pool);
   rpc_register_callback(
       device, RPC_MALLOC,
@@ -522,6 +524,11 @@ static hsa_status_t hsa_memcpy(void *dst, hsa_agent_t dst_agent,
   return HSA_STATUS_SUCCESS;
 }
 
+hsa_agent_t dev_agent;
+hsa_agent_t host_agent;
+
+void *screen_buffer;
+
 static SDL_Window *window = nullptr;
 static SDL_Renderer *renderer = nullptr;
 static SDL_Texture *texture = nullptr;
@@ -623,10 +630,53 @@ static void init_sdl_windows() {
                               DOOMGENERIC_RESY);
 }
 
+#define KEYQUEUE_SIZE 16
+
+static unsigned short s_KeyQueue[KEYQUEUE_SIZE];
+static unsigned int s_KeyQueueWriteIndex = 0;
+static unsigned int s_KeyQueueReadIndex = 0;
+
+static void addKeyToQueue(int pressed, unsigned int keyCode) {
+  unsigned char key = convertToDoomKey(keyCode);
+
+  unsigned short keyData = (pressed << 8) | key;
+
+  s_KeyQueue[s_KeyQueueWriteIndex] = keyData;
+  s_KeyQueueWriteIndex++;
+  s_KeyQueueWriteIndex %= KEYQUEUE_SIZE;
+}
+
 // Function pointer the RPC implementation will call.
 static void sdl_get_input(void *args) {
   uint32_t *key = *reinterpret_cast<uint32_t **>(args);
 
+  if (s_KeyQueueReadIndex == s_KeyQueueWriteIndex) {
+    *key = 0;
+  } else {
+    *key = s_KeyQueue[s_KeyQueueReadIndex];
+    s_KeyQueueReadIndex++;
+    s_KeyQueueReadIndex %= KEYQUEUE_SIZE;
+  }
+}
+
+// Function pointer the RPC implementation will call.
+static void sdl_draw(void *args) {
+  void *buffer_ptr = *reinterpret_cast<void **>(args);
+
+  // Copy the framebuffer locally, much faster than relying on page migration.
+  if (hsa_status_t err =
+          hsa_memcpy(screen_buffer, host_agent, buffer_ptr, dev_agent,
+                     DOOMGENERIC_RESX * DOOMGENERIC_RESY * sizeof(uint32_t)))
+    handle_error(err);
+
+  SDL_UpdateTexture(texture, NULL, screen_buffer,
+                    DOOMGENERIC_RESX * sizeof(uint32_t));
+
+  SDL_RenderClear(renderer);
+  SDL_RenderCopy(renderer, texture, NULL, NULL);
+  SDL_RenderPresent(renderer);
+
+  // Poll the events.
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_QUIT) {
@@ -634,23 +684,16 @@ static void sdl_get_input(void *args) {
       atexit(SDL_Quit);
       exit(1);
     }
-    unsigned char doom_key = convertToDoomKey(e.key.keysym.sym);
-    if (e.type == SDL_KEYDOWN)
-      *key = 1u << 8 | doom_key;
-    else if (e.type == SDL_KEYUP)
-      *key = doom_key;
+    if (e.type == SDL_KEYDOWN) {
+      // KeySym sym = XKeycodeToKeysym(s_Display, e.xkey.keycode, 0);
+      // printf("KeyPress:%d sym:%d\n", e.xkey.keycode, sym);
+      addKeyToQueue(1, e.key.keysym.sym);
+    } else if (e.type == SDL_KEYUP) {
+      // KeySym sym = XKeycodeToKeysym(s_Display, e.xkey.keycode, 0);
+      // printf("KeyRelease:%d sym:%d\n", e.xkey.keycode, sym);
+      addKeyToQueue(0, e.key.keysym.sym);
+    }
   }
-}
-
-// Function pointer the RPC implementation will call.
-static void sdl_draw(void *args) {
-  void *screen_buffer = *reinterpret_cast<void **>(args);
-  SDL_UpdateTexture(texture, NULL, screen_buffer,
-                    DOOMGENERIC_RESX * sizeof(uint32_t));
-
-  SDL_RenderClear(renderer);
-  SDL_RenderCopy(renderer, texture, NULL, NULL);
-  SDL_RenderPresent(renderer);
 }
 
 static int load(int argc, const char **argv, const char **envp, void *image,
@@ -671,8 +714,6 @@ static int load(int argc, const char **argv, const char **envp, void *image,
     handle_error(err);
 
   // Obtain a single agent for the device and host to use the HSA memory model.
-  hsa_agent_t dev_agent;
-  hsa_agent_t host_agent;
   if (hsa_status_t err = get_agent<HSA_DEVICE_TYPE_GPU>(&dev_agent))
     handle_error(err);
   if (hsa_status_t err = get_agent<HSA_DEVICE_TYPE_CPU>(&host_agent))
@@ -724,6 +765,13 @@ static int load(int argc, const char **argv, const char **envp, void *image,
           get_agent_memory_pool<HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_COARSE_GRAINED>(
               dev_agent, &coarsegrained_pool))
     handle_error(err);
+
+  if (hsa_status_t err = hsa_amd_memory_pool_allocate(
+          finegrained_pool,
+          DOOMGENERIC_RESX * DOOMGENERIC_RESY * sizeof(uint32_t),
+          /*flags=*/0, &screen_buffer))
+    handle_error(err);
+  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, screen_buffer);
 
   // Allocate fine-grained memory on the host to hold the pointer array for the
   // copied argv and allow the GPU agent to access it.
