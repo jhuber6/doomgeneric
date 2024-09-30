@@ -7,7 +7,7 @@ library for GPUs](https://libc.llvm.org/gpu/) based on the
 To try it you will need a WAD file (game data). If you don't own the game,
 shareware version is freely available (doom1.wad).
 
-This implementation works on NVIDIA as well as AMDGPU. Do use the NVIDIA
+This implementation works on NVIDIA as well as AMDGPU. To use the NVIDIA
 implementation perform the same steps but with the `nvptx` loader and make
 target.
 
