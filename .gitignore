@@ -7,7 +7,9 @@
 *.json
 *.map
 *.wad
+*.savegame
 amdgpu-loader
+doomgeneric/doomgeneric
 *.cache/
 build/
 *~
