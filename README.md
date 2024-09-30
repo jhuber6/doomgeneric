@@ -53,3 +53,5 @@ $ ./amdgpu-loader/amdgpu-loader --threads 512 ./doomgeneric/doomgeneric -iwad do
 ```
 
 ![AMDGPU](screenshots/amdgpu.png)
+
+Thanks to @hardcode84 for porting help.
