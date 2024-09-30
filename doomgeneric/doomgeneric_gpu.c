@@ -62,10 +62,7 @@ int main(int argc, char **argv, char **envp) {
   uint32_t last_tick = 0;
 #endif
   for (int i = 0;; ++i) {
-    if (get_thread_id() == 0)
-      doomgeneric_Tick();
-
-    doomgeneric_Draw();
+    doomgeneric_Tick();
 
 #ifdef SHOWFPS
     if (get_thread_id() == 0) {

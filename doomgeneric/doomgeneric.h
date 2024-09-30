@@ -28,8 +28,6 @@ extern pixel_t* DG_ScreenBuffer;
 
 void doomgeneric_Create(int argc, char **argv);
 void doomgeneric_Tick();
-void doomgeneric_Draw();
-
 
 //Implement below functions for your platform
 void DG_Init();

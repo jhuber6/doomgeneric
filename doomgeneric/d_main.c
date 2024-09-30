@@ -417,15 +417,17 @@ boolean D_GrabMouseCallback(void)
 
 void doomgeneric_Tick()
 {
-    // frame syncronous IO operations
-    I_StartFrame ();
+    if (get_thread_id() == 0) {
+      // frame syncronous IO operations
+      I_StartFrame ();
 
-    TryRunTics (); // will run at least one tic
+      TryRunTics (); // will run at least one tic
 
-    S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
-}
+      S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
+    }
 
-void doomgeneric_Draw() {
+    sync_threads();
+                                               
     // Update display, next frame, with current state.
     if (screenvisible)
     {
