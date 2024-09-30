@@ -349,15 +349,21 @@ CUresult launch_kernel(CUmodule binary, CUstream stream,
   if (CUresult err = cuStreamCreate(&memory_stream, CU_STREAM_NON_BLOCKING))
     handle_error(err);
 
+  // This RPC library is a mess, I'm going to gut it eventually.
   rpc_register_callback(
       rpc_device, RPC_MALLOC,
       [](rpc_port_t port, void *data) {
         auto malloc_handler = [](rpc_buffer_t *buffer, void *data) -> void {
+          CUstream memory_stream = *static_cast<CUstream *>(data);
           uint64_t size = buffer->data[0];
-          void *dev_ptr;
-          if (CUresult err = cuMemAllocHost(&dev_ptr, size))
-            handle_error(err);
-          buffer->data[0] = reinterpret_cast<uintptr_t>(dev_ptr);
+          CUdeviceptr dev_ptr;
+          if (CUresult err = cuMemAllocAsync(&dev_ptr, size, memory_stream))
+            dev_ptr = 0UL;
+
+          // Wait until the memory allocation is complete.
+          while (cuStreamQuery(memory_stream) == CUDA_ERROR_NOT_READY)
+            ;
+          buffer->data[0] = static_cast<uintptr_t>(dev_ptr);
         };
         rpc_recv_and_send(port, malloc_handler, data);
       },
@@ -366,8 +372,9 @@ CUresult launch_kernel(CUmodule binary, CUstream stream,
       rpc_device, RPC_FREE,
       [](rpc_port_t port, void *data) {
         auto free_handler = [](rpc_buffer_t *buffer, void *data) {
-          if (CUresult err =
-                  cuMemFreeHost(reinterpret_cast<void *>(buffer->data[0])))
+          CUstream memory_stream = *static_cast<CUstream *>(data);
+          if (CUresult err = cuMemFreeAsync(
+                  static_cast<CUdeviceptr>(buffer->data[0]), memory_stream))
             handle_error(err);
         };
         rpc_recv_and_send(port, free_handler, data);
@@ -535,7 +542,13 @@ static void sdl_get_input(void *args) {
 static void sdl_draw(void *args) {
   void *buffer = *reinterpret_cast<void **>(args);
 
-  SDL_UpdateTexture(texture, NULL, buffer, DOOMGENERIC_RESX * sizeof(uint32_t));
+  if (CUresult err =
+          cuMemcpyDtoH(screen_buffer, reinterpret_cast<CUdeviceptr>(buffer),
+                       DOOMGENERIC_RESX * DOOMGENERIC_RESY * sizeof(uint32_t)))
+    handle_error(err);
+
+  SDL_UpdateTexture(texture, NULL, screen_buffer,
+                    DOOMGENERIC_RESX * sizeof(uint32_t));
 
   SDL_RenderClear(renderer);
   SDL_RenderCopy(renderer, texture, NULL, NULL);
@@ -574,10 +587,8 @@ int load(int argc, const char **argv, const char **envp, void *image,
   if (CUresult err = cuCtxSetCurrent(context))
     handle_error(err);
 
-  // Increase the stack size per thread.
-  // TODO: We should allow this to be passed in so only the tests that require a
-  // larger stack can specify it to save on memory usage.
-  if (CUresult err = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, 3 * 1024))
+  // Increase the stack size per thread, this is very heavy on stack.
+  if (CUresult err = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, 1024 * 2))
     handle_error(err);
 
   // Initialize a non-blocking CUDA stream to execute the kernel.
@@ -625,10 +636,8 @@ int load(int argc, const char **argv, const char **envp, void *image,
     handle_error(err);
   void **storage;
 
-  if (CUresult err =
-          cuMemAllocHost(&screen_buffer, DOOMGENERIC_RESX * DOOMGENERIC_RESY *
-                                             sizeof(uint32_t)))
-    handle_error(err);
+  screen_buffer =
+      malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * sizeof(uint32_t));
 
   std::pair<const char *, void *> symbols[] = {
       {"key_buffer", reinterpret_cast<void *>(key_buffer)},

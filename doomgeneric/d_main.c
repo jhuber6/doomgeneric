@@ -426,8 +426,6 @@ void doomgeneric_Tick()
       S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
     }
 
-    sync_threads();
-                                               
     // Update display, next frame, with current state.
     if (screenvisible)
     {
@@ -472,7 +470,11 @@ void D_DoomLoop (void)
         wipegamestate = gamestate;
     }
 
+    // This will deadlock because the GPU expects it to be called with many
+    // threads, but if we're in the init stage we only have one.
+#if !defined(__AMDGPU__) && !defined(__NVPTX__)
     doomgeneric_Tick();
+#endif
 }
 
 
