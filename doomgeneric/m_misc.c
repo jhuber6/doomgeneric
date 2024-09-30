@@ -58,7 +58,7 @@ void M_MakeDirectory(char *path)
     mkdir(path);
 #elif defined(__AMDGPU__) || defined(__NVPTX__)
     // Calling system(...) with a runtime string, what could go wrong?
-    char buffer[256] = "mkdir ";
+    char buffer[256] = "mkdir -s ";
     strncat(buffer, path, sizeof(buffer) - strlen(buffer) - 1);
     system(buffer);
 #else

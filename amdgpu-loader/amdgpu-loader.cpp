@@ -48,7 +48,6 @@
 #include <llvmlibc_rpc_server.h>
 
 #include <SDL2/SDL.h>
-#include <sys/mman.h>
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
@@ -335,10 +334,7 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
           executable, kernel_name, &dev_agent, &symbol))
     return err;
 
-  // Register RPC callbacks for the malloc and free functions on HSA. This uses
-  // paged memory to make it easier to pass things from the GPU, this isn't
-  // strictly necessary and I don't bother freeing the memory since it's
-  // bounded.
+  // Register RPC callbacks for the malloc and free functions on HSA.
   auto tuple = std::make_tuple(dev_agent, coarsegrained_pool);
   rpc_register_callback(
       device, RPC_MALLOC,
@@ -346,33 +342,12 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
         auto malloc_handler = [](rpc_buffer_t *buffer, void *data) -> void {
           auto &[dev_agent, pool] = *static_cast<decltype(tuple) *>(data);
           uint64_t size = buffer->data[0];
-          auto *dev_ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-          hsa_amd_svm_attribute_pair_t attrs[] = {
-              {HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE,
-               __builtin_bit_cast(uint64_t, dev_agent)}};
-
+          void *dev_ptr = nullptr;
           if (hsa_status_t err =
-                  hsa_amd_svm_attributes_set(dev_ptr, size, attrs,
-                                             /*attribute_count=*/1))
-            handle_error(err);
-
-          hsa_signal_t signal;
-          if (hsa_status_t err = hsa_signal_create(1, 0, nullptr, &signal))
-            handle_error(err);
-
-          if (hsa_status_t err = hsa_amd_svm_prefetch_async(
-                  dev_ptr, size, dev_agent,
-                  /*num_dep_signals=*/0, nullptr, signal))
-            handle_error(err);
-
-          while (hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_EQ, 0,
-                                           UINT64_MAX,
-                                           HSA_WAIT_STATE_ACTIVE) != 0)
-            ;
-
-          if (hsa_status_t err = hsa_signal_destroy(signal))
-            handle_error(err);
+                  hsa_amd_memory_pool_allocate(pool, size,
+                                               /*flags=*/0, &dev_ptr))
+            dev_ptr = nullptr;
+          hsa_amd_agents_allow_access(1, &dev_agent, nullptr, dev_ptr);
           buffer->data[0] = reinterpret_cast<uintptr_t>(dev_ptr);
         };
         rpc_recv_and_send(port, malloc_handler, data);
@@ -382,7 +357,9 @@ hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
       device, RPC_FREE,
       [](rpc_port_t port, void *data) {
         auto free_handler = [](rpc_buffer_t *buffer, void *) {
-          /* no-op for now */
+          if (hsa_status_t err = hsa_amd_memory_pool_free(
+                  reinterpret_cast<void *>(buffer->data[0])))
+            handle_error(err);
         };
         rpc_recv_and_send(port, free_handler, data);
       },
@@ -684,15 +661,10 @@ static void sdl_draw(void *args) {
       atexit(SDL_Quit);
       exit(1);
     }
-    if (e.type == SDL_KEYDOWN) {
-      // KeySym sym = XKeycodeToKeysym(s_Display, e.xkey.keycode, 0);
-      // printf("KeyPress:%d sym:%d\n", e.xkey.keycode, sym);
+    if (e.type == SDL_KEYDOWN)
       addKeyToQueue(1, e.key.keysym.sym);
-    } else if (e.type == SDL_KEYUP) {
-      // KeySym sym = XKeycodeToKeysym(s_Display, e.xkey.keycode, 0);
-      // printf("KeyRelease:%d sym:%d\n", e.xkey.keycode, sym);
+    else if (e.type == SDL_KEYUP)
       addKeyToQueue(0, e.key.keysym.sym);
-    }
   }
 }
 
@@ -902,59 +874,43 @@ static int load(int argc, const char **argv, const char **envp, void *image,
       handle_error(err);
   }
 
-  // Copy the SDL renderer function to the GPU so it can be invoked via RPC.
-  hsa_executable_symbol_t draw_sym;
-  if (HSA_STATUS_SUCCESS ==
-      hsa_executable_get_symbol_by_name(executable, "draw_framebuffer",
-                                        &dev_agent, &draw_sym)) {
+  void *key_buffer;
+  if (hsa_status_t err =
+          hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(uint32_t *),
+                                       /*flags=*/0, &key_buffer))
+    handle_error(err);
+  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, key_buffer);
 
-    void *draw_function;
+  // Initialize these symbols on the GPU to control interacting with the SDL
+  // window.
+  std::pair<const char *, void *> symbols[] = {
+      {"key_buffer", reinterpret_cast<void *>(key_buffer)},
+      {"draw_framebuffer", reinterpret_cast<void *>(sdl_draw)},
+      {"get_input", reinterpret_cast<void *>(sdl_get_input)}};
+  for (auto &[string, value] : symbols) {
+    hsa_executable_symbol_t sym;
+    if (hsa_status_t err = hsa_executable_get_symbol_by_name(executable, string,
+                                                             &dev_agent, &sym))
+      handle_error(err);
+
+    void *storage;
     if (hsa_status_t err =
             hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(void *),
-                                         /*flags=*/0, &draw_function))
+                                         /*flags=*/0, &storage))
       handle_error(err);
-    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, draw_function);
+    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, storage);
+    *reinterpret_cast<void **>(storage) = value;
 
-    *reinterpret_cast<void **>(draw_function) =
-        reinterpret_cast<void *>(sdl_draw);
-    void *draw_addr;
+    void *addr;
     if (hsa_status_t err = hsa_executable_symbol_get_info(
-            draw_sym, HSA_EXECUTABLE_SYMBOL_INFO_VARIABLE_ADDRESS, &draw_addr))
+            sym, HSA_EXECUTABLE_SYMBOL_INFO_VARIABLE_ADDRESS, &addr))
       handle_error(err);
 
-    if (hsa_status_t err = hsa_memcpy(draw_addr, dev_agent, draw_function,
-                                      host_agent, sizeof(void *)))
+    if (hsa_status_t err =
+            hsa_memcpy(addr, dev_agent, storage, host_agent, sizeof(void *)))
       handle_error(err);
 
-    if (hsa_status_t err = hsa_amd_memory_pool_free(draw_function))
-      handle_error(err);
-  }
-
-  // Copy the SDL input function to the GPU so it can be invoked via RPC.
-  hsa_executable_symbol_t input_sym;
-  if (HSA_STATUS_SUCCESS ==
-      hsa_executable_get_symbol_by_name(executable, "get_input", &dev_agent,
-                                        &input_sym)) {
-
-    void **input_function;
-    if (hsa_status_t err = hsa_amd_memory_pool_allocate(
-            finegrained_pool, sizeof(void *),
-            /*flags=*/0, reinterpret_cast<void **>(&input_function)))
-      handle_error(err);
-    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, input_function);
-
-    *input_function = reinterpret_cast<void *>(sdl_get_input);
-    void *input_addr;
-    if (hsa_status_t err = hsa_executable_symbol_get_info(
-            input_sym, HSA_EXECUTABLE_SYMBOL_INFO_VARIABLE_ADDRESS,
-            &input_addr))
-      handle_error(err);
-
-    if (hsa_status_t err = hsa_memcpy(input_addr, dev_agent, input_function,
-                                      host_agent, sizeof(void *)))
-      handle_error(err);
-
-    if (hsa_status_t err = hsa_amd_memory_pool_free(input_function))
+    if (hsa_status_t err = hsa_amd_memory_pool_free(storage))
       handle_error(err);
   }
 
