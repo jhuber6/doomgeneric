@@ -200,7 +200,7 @@ static inline uint32_t get_lane_size() { return 32; }
 // Copies the value from the first active thread in the warp to the rest.
 [[clang::convergent]] static inline uint32_t broadcast_value(uint64_t lane_mask,
                                                              uint32_t x) {
-  uint32_t mask = static_cast<uint32_t>(lane_mask);
+  uint32_t mask = (uint32_t)(lane_mask);
   uint32_t id = __builtin_ffs(mask) - 1;
   return __nvvm_shfl_sync_idx_i32(mask, x, id, get_lane_size() - 1);
 }
@@ -208,7 +208,7 @@ static inline uint32_t get_lane_size() { return 32; }
 // Returns a bitmask of threads in the current lane for which \p x is true.
 [[clang::convergent]] static inline uint64_t ballot(uint64_t lane_mask,
                                                     _Bool x) {
-  uint32_t mask = static_cast<uint32_t>(lane_mask);
+  uint32_t mask = (uint32_t)(lane_mask);
   return __nvvm_vote_ballot_sync(mask, x);
 }
 
@@ -217,13 +217,13 @@ static inline uint32_t get_lane_size() { return 32; }
 
 // Waits for all threads in the warp to reconverge for independent scheduling.
 [[clang::convergent]] static inline void sync_lane(uint64_t mask) {
-  __nvvm_bar_warp_sync(static_cast<uint32_t>(mask));
+  __nvvm_bar_warp_sync((uint32_t)(mask));
 }
 
 // Shuffles the the lanes inside the warp according to the given index.
 [[clang::convergent]] static inline uint32_t shuffle(uint64_t lane_mask,
                                                      uint32_t idx, uint32_t x) {
-  uint32_t mask = static_cast<uint32_t>(lane_mask);
+  uint32_t mask = (uint32_t)(lane_mask);
   uint32_t bitmask = (mask >> idx) & 1;
   return -bitmask & __nvvm_shfl_sync_idx_i32(mask, x, idx, get_lane_size() - 1);
 }

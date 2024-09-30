@@ -202,7 +202,10 @@ sfxinfo_t S_sfx[] =
   SOUND("punch",  64),
   SOUND("hoof",   70),
   SOUND("metal",  70),
+  // NVPTX cannot handle self-referential initializers.
+#ifndef __NVPTX__
   SOUND_LINK("chgun", 64, sfx_pistol, 150, 0),
+#endif
   SOUND("tink",   60),
   SOUND("bdopn",  100),
   SOUND("bdcls",  100),
