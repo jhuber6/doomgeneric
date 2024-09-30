@@ -167,11 +167,6 @@ extern  boolean setsizeneeded;
 extern  int             showMessages;
 void R_ExecuteSetViewSize (void);
 
-// These are shared between the threads in the block.
-int Local wipestart [[clang::loader_uninitialized]];
-boolean Local wipe [[clang::loader_uninitialized]];
-boolean Local done [[clang::loader_uninitialized]];
-
 void D_Display (void)
 {
     static  boolean		viewactivestate = false;
@@ -183,7 +178,17 @@ void D_Display (void)
     int				nowtime;
     int				tics;
     int				y;
-    boolean			redrawsbar;
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+    // These are shared between all threads in the block.
+    static int Local wipestart;
+    static boolean Local wipe;
+    static boolean Local done;
+#else
+    int wipestart;
+    boolean wipe;
+    boolean done;
+#endif
+    boolean		  	redrawsbar;
 
     if (nodrawers)
     	return;                    // for comparative timing / profiling
