@@ -57,14 +57,17 @@ int main(int argc, char **argv, char **envp) {
     doomgeneric_Create(argc, argv);
   sync_threads();
 
+#ifdef SHOWFPS
   uint32_t time = DG_GetTicksMs();
   uint32_t last_tick = 0;
+#endif
   for (int i = 0;; ++i) {
     if (get_thread_id() == 0)
       doomgeneric_Tick();
 
     doomgeneric_Draw();
 
+#ifdef SHOWFPS
     if (get_thread_id() == 0) {
       int interval = 10;
       if (i % interval == 0) {
@@ -78,6 +81,7 @@ int main(int argc, char **argv, char **envp) {
         }
       }
     }
+#endif
   }
 
   return 0;

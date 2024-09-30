@@ -1,67 +1,55 @@
-# doomgeneric
-The purpose of doomgeneric is to make porting Doom easier.
-Of course Doom is already portable but with doomgeneric it is possible with just a few functions.
+# doomgpu
 
-To try it you will need a WAD file (game data). If you don't own the game, shareware version is freely available (doom1.wad).
+This is a port of DOOM that runs on the GPU using the [LLVM C library for
+GPUs](https://libc.llvm.org/gpu/) based on the
+[doomgeneric](https://github.com/ozkl/doomgeneric) interface.
 
-# porting
-Create a file named doomgeneric_yourplatform.c and just implement these functions to suit your platform.
-* DG_Init
-* DG_DrawFrame
-* DG_SleepMs
-* DG_GetTicksMs
-* DG_GetKey
+To try it you will need a WAD file (game data). If you don't own the game,
+shareware version is freely available (doom1.wad).
 
-|Functions            |Description|
-|---------------------|-----------|
-|DG_Init              |Initialize your platfrom (create window, framebuffer, etc...).
-|DG_DrawFrame         |Frame is ready in DG_ScreenBuffer. Copy it to your platform's screen.
-|DG_SleepMs           |Sleep in milliseconds.
-|DG_GetTicksMs        |The ticks passed since launch in milliseconds.
-|DG_GetKey            |Provide keyboard events.
-|DG_SetWindowTitle    |Not required. This is for setting the window title as Doom sets this from WAD file.
+This implementation currently only works on AMD GPUs, support for NVIDIA will
+require a port of the facilities in the loader. This is also really hacky and
+will likely change in the future.
 
-### main loop
-At start, call doomgeneric_Create().
+# requirements
 
-In a loop, call doomgeneric_Tick().
+* A Linux operating system
+* An AMDGPU with ROCm support
+* SDL2 libraries
+* A ROCm or ROCR-Runtime installation
+* An LLVM build off of the main branch
 
-In simplest form:
+# why
+
+Because I can.
+
+# how
+
+The `clang` compiler can target GPUs directly. We emit a single kernel that
+calls the 'main' function. Functions that require the operating system are
+handled through the RPC interface. See [my LLVM
+talk](https://www.youtube.com/watch?v=_LLGc48GYHc) for more information.
+
+This implementation defines the `amdgpu-loader` utility, which handles setting
+up the SDL2 window interface and provides functions to get the input keys and
+write the output framebuffer. Okay, it's not *entirely* on the GPU, but all the
+logic and rendering runs on the GPU.
+
+# building
+
+You will need an LLVM installation with the LLVM C library for GPUs enabled.
+Don't do a shared library build of LLVM it will probably break. See [the
+documentation](https://libc.llvm.org/gpu/building.html#standard-runtimes-build)
+for how to build it.
+
+Once installed, use the newly built `clang` compiler to build the libraries.
+Make sure that you have `include/hsa.h` and `libhsa-runtime64.so` available from
+your ROCm installation.
+
+```console
+$ make -C amdgpu_loader/ -j
+$ make -C doomgeneric/ -j
+$ ./amdgpu-loader/amdgpu-loader --threads 512 ./doomgeneric/doomgeneric -iwad doom1.wad
 ```
-int main(int argc, char **argv)
-{
-    doomgeneric_Create(argc, argv);
 
-    while (1)
-    {
-        doomgeneric_Tick();
-    }
-    
-    return 0;
-}
-```
-
-# sound
-Sound is much harder to implement! If you need sound, take a look at SDL port. It fully supports sound and music! Where to start? Define FEATURE_SOUND, assign DG_sound_module and DG_music_module.
-
-# platforms
-Ported platforms include Windows, X11, SDL, emscripten. Just look at (doomgeneric_win.c, doomgeneric_xlib.c, doomgeneric_sdl.c).
-Makefiles provided for each platform.
-
-## emscripten
-You can try it directly here:
-https://ozkl.github.io/doomgeneric/
-
-emscripten port is based on SDL port, so it supports sound and music! For music, timidity backend is used.
-
-## Windows
-![Windows](screenshots/windows.png)
-
-## X11 - Ubuntu
-![Ubuntu](screenshots/ubuntu.png)
-
-## X11 - FreeBSD
-![FreeBSD](screenshots/freebsd.png)
-
-## SDL
-![SDL](screenshots/sdl.png)
+![AMDGPU](screenshots/amdgpu.png)

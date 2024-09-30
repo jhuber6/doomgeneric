@@ -16,7 +16,7 @@ TRIPLE=amdgcn-amd-amdhsa
 CC=clang
 CFLAGS+= -O1 --target=$(TRIPLE) -mcpu=native -flto -nogpulib -fno-builtin-printf -fconvergent-functions
 LDFLAGS+=-Wl,--gc-sections
-CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE # -DUSEASM
+CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE # -DUSEASM -DSHOWFPS
 LIBS+=-lm -lc $(shell dirname $(shell which $(CC)))/../lib/${TRIPLE}/crt1.o
 
 # subdirectory for objects
