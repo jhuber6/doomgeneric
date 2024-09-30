@@ -15,7 +15,7 @@
 [[gnu::visibility("protected")]] void *get_input = NULL;
 [[gnu::visibility("protected")]] uint32_t *key_buffer = NULL;
 
-void DG_Init() { }
+void DG_Init() {}
 
 void DG_DrawFrame() {
   rpc_host_call(draw_framebuffer, &DG_ScreenBuffer, sizeof(void *));
