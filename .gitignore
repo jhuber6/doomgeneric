@@ -8,7 +8,8 @@
 *.map
 *.wad
 *.savegame
-amdgpu-loader
+amdgpu-loader/amdgpu-loader
+nvidia-loader/nvidia-loader
 doomgeneric/doomgeneric
 *.cache/
 build/
