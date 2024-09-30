@@ -154,7 +154,7 @@ void cmap_to_rgb565(uint16_t * out, uint8_t * in, int in_pixels)
     }
 }
 
-void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels, boolean multi_threaded)
+void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels)
 {
     int i, j, k;
     struct color c;
@@ -163,7 +163,7 @@ void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels, boolean multi_threaded
 
     uint32_t thrd_id = get_thread_id_x();
     uint32_t thrd_count = get_num_threads_x();
-    for (i = 0; i < in_pixels; i += multi_threaded ? thrd_count : 1)
+    for (i = 0; i < in_pixels; i += thrd_count)
     {
         int local_id = i + thrd_id;
         if (local_id >= in_pixels)
@@ -274,7 +274,7 @@ void I_UpdateNoBlit (void)
 // I_FinishUpdate
 //
 
-void I_FinishUpdate (boolean multi_threaded)
+void I_FinishUpdate ()
 {
     int y;
     int x_offset, y_offset, x_offset_end;
@@ -315,16 +315,16 @@ void I_FinishUpdate (boolean multi_threaded)
             }
 #else
             //cmap_to_rgb565((void*)line_out, (void*)line_in, SCREENWIDTH);
-            cmap_to_fb((void*)line_out, (void*)line_in, SCREENWIDTH, multi_threaded);
+            cmap_to_fb((void*)line_out, (void*)line_in, SCREENWIDTH);
 #endif
             line_out += (SCREENWIDTH * fb_scaling * (s_Fb.bits_per_pixel/8)) + x_offset_end;
         }
         line_in += SCREENWIDTH;
     }
 
+    sync_threads();
     if (get_thread_id() == 0)
       DG_DrawFrame();
-    sync_threads();
 }
 
 //

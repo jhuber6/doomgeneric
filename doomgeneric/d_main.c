@@ -170,6 +170,7 @@ void R_ExecuteSetViewSize (void);
 // These are shared between the threads in the block.
 int Local wipestart [[clang::loader_uninitialized]];
 boolean Local wipe [[clang::loader_uninitialized]];
+boolean Local done [[clang::loader_uninitialized]];
 
 void D_Display (void)
 {
@@ -182,7 +183,6 @@ void D_Display (void)
     int				nowtime;
     int				tics;
     int				y;
-    boolean			done;
     boolean			redrawsbar;
 
     if (nodrawers)
@@ -307,7 +307,7 @@ void D_Display (void)
     // normal update
     if (!wipe)
     {
-	I_FinishUpdate (true);              // page flip or blit buffer
+	I_FinishUpdate ();              // page flip or blit buffer
 	return;
     }
     
@@ -316,7 +316,9 @@ void D_Display (void)
       wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
 
       wipestart = I_GetTime () - 1;
+    }
 
+    sync_threads();
       do
       {
     do
@@ -326,14 +328,16 @@ void D_Display (void)
               I_Sleep(1);
     } while (tics <= 0);
           
-    wipestart = nowtime;
-    done = wipe_ScreenWipe(wipe_Melt
-               , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
-    I_UpdateNoBlit ();
-    M_Drawer ();                            // menu is drawn even on top of wipes
-    I_FinishUpdate (false);                      // page flip or blit buffer
-      } while (!done);
+    if (get_thread_id() == 0) {
+      wipestart = nowtime;
+      done = wipe_ScreenWipe(wipe_Melt
+                 , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
+      I_UpdateNoBlit ();
+      M_Drawer ();                            // menu is drawn even on top of wipes
     }
+    sync_threads();
+    I_FinishUpdate ();                      // page flip or blit buffer
+      } while (!done);
   sync_threads();
 }
 
