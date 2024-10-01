@@ -57,6 +57,8 @@ $ ./amdgpu-loader/amdgpu-loader --threads 512 ./doomgeneric/doomgeneric -iwad do
 ```
 
 ![AMDGPU](screenshots/amdgpu.png)
+Video
+[![Hastily recorded video demo](https://img.youtube.com/vi/E7X1yvyVml4/maxresdefault.jpg)](https://www.youtube.com/watch?v=E7X1yvyVml4)
 
 Thanks to [@hardcode84](https://github.com/hardcode84) for porting help.
 
