@@ -1,5 +1,7 @@
 # doomgpu
 
+MERGED INTO THE MASTER BRANCH
+
 This is a port of DOOM that runs (almost) entirely on the GPU using the [LLVM C
 library for GPUs](https://libc.llvm.org/gpu/) based on the
 [doomgeneric](https://github.com/ozkl/doomgeneric) interface.
