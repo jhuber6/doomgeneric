@@ -3,22 +3,24 @@
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
-#include "gpu_utils.h"
 #include "m_argv.h"
 
-#include <gpu/rpc.h>
+#include <gpuintrin.h>
+#include <shared/rpc.h>
 
 #define NS_IN_MS 1000000L
 
-// Externally initialized and handled by the loader utility.
-[[gnu::visibility("protected")]] void *draw_framebuffer = NULL;
-[[gnu::visibility("protected")]] void *get_input = NULL;
-[[gnu::visibility("protected")]] uint32_t *key_buffer = NULL;
+[[gnu::visibility("protected")]] extern rpc::Client
+    client asm("__llvm_rpc_client");
 
 void DG_Init() {}
 
 void DG_DrawFrame() {
-  rpc_host_call(draw_framebuffer, &DG_ScreenBuffer, sizeof(void *));
+  auto port = client.open<DOOM_DRAW_BUFFER>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = reinterpret_cast<uintptr_t>(DG_ScreenBuffer);
+  });
+  port.close();
 }
 
 void DG_SleepMs(uint32_t ms) {
@@ -35,12 +37,17 @@ uint32_t DG_GetTicksMs() {
 }
 
 int DG_GetKey(int *pressed, unsigned char *doomKey) {
-  rpc_host_call(get_input, &key_buffer, sizeof(uint32_t *));
-  if (*key_buffer == 0)
+  auto port = client.open<DOOM_GET_INPUT>();
+  uint32_t key = 0;
+  port.send_and_recv(
+      [](rpc::Buffer *, uint32_t) {},
+      [&](rpc::Buffer *buffer, uint32_t) { key = buffer->data[0]; });
+  port.close();
+  if (key == 0)
     return 0;
 
-  *pressed = *key_buffer >> 8;
-  *doomKey = *key_buffer & 0xFF;
+  *pressed = key >> 8;
+  *doomKey = key & 0xFF;
 
   return 1;
 }
@@ -48,9 +55,9 @@ int DG_GetKey(int *pressed, unsigned char *doomKey) {
 void DG_SetWindowTitle(const char *title) {}
 
 int main(int argc, char **argv, char **envp) {
-  if (get_thread_id() == 0)
+  if (__gpu_thread_id(0) == 0)
     doomgeneric_Create(argc, argv);
-  sync_threads();
+  __gpu_sync_threads();
 
 #ifdef SHOWFPS
   uint32_t time = DG_GetTicksMs();
@@ -60,7 +67,7 @@ int main(int argc, char **argv, char **envp) {
     doomgeneric_Tick();
 
 #ifdef SHOWFPS
-    if (get_thread_id() == 0) {
+    if (__gpu_thread_id(0) == 0) {
       int interval = 10;
       if (i % interval == 0) {
         uint32_t new_time = DG_GetTicksMs();

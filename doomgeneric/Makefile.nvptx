@@ -14,7 +14,8 @@ endif
 
 TRIPLE=nvptx64-nvidia-cuda
 CC=clang
-CFLAGS+= -O1 --target=$(TRIPLE) -march=native -flto -nogpulib -fno-builtin-printf -fconvergent-functions
+CXX=clang++
+CFLAGS+= -O1 -I$(shell dirname $(shell which $(CC)))/../include --target=$(TRIPLE) -march=native -flto -nogpulib -fno-builtin-printf
 LDFLAGS+=-Wl,--suppress-stack-size-warning
 CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE # -DUSEASM -DSHOWFPS
 LIBS+=-lm -lc $(shell dirname $(shell which $(CC)))/../lib/${TRIPLE}/crt1.o
@@ -49,6 +50,10 @@ $(OBJDIR):
 $(OBJDIR)/%.o:	%.c
 	@echo [Compiling $<]
 	$(VB)$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/%.o:	%.cc
+	@echo [Compiling $<]
+	$(VB)$(CXX) $(CFLAGS) -c $< -o $@
 
 print:
 	@echo OBJS: $(OBJS)

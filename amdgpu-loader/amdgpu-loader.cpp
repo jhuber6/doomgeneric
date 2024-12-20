@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/BinaryFormat/Magic.h"
+#include "llvm/Frontend/Offloading/Utility.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
@@ -20,6 +21,7 @@
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/WithColor.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -27,25 +29,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <sys/file.h>
 #include <tuple>
 #include <utility>
 
-#if defined(__has_include)
-#if __has_include("hsa/hsa.h")
 #include "hsa/hsa.h"
 #include "hsa/hsa_ext_amd.h"
-#elif __has_include("hsa.h")
-#include "hsa.h"
-#include "hsa_ext_amd.h"
-#endif
-#else
-#include "hsa/hsa.h"
-#include "hsa/hsa_ext_amd.h"
-#endif
 
-#include <llvmlibc_rpc_opcodes.h>
-#include <llvmlibc_rpc_server.h>
+#include <shared/rpc.h>
+#include <shared/rpc_opcodes.h>
 
 #include <SDL2/SDL.h>
 
@@ -177,12 +168,6 @@ void *copy_environment(const char **envp, Allocator alloc) {
 
 inline void handle_error_impl(const char *file, int32_t line, const char *msg) {
   fprintf(stderr, "%s:%d:0: Error: %s\n", file, line, msg);
-  exit(EXIT_FAILURE);
-}
-
-inline void handle_error_impl(const char *file, int32_t line,
-                              rpc_status_t err) {
-  fprintf(stderr, "%s:%d:0: Error: %d\n", file, line, err);
   exit(EXIT_FAILURE);
 }
 #define handle_error(X) handle_error_impl(__FILE__, __LINE__, X)
@@ -319,164 +304,6 @@ hsa_status_t get_agent_memory_pool(hsa_agent_t agent,
   return iterate_agent_memory_pools(agent, cb);
 }
 
-template <typename args_t>
-hsa_status_t launch_kernel(hsa_agent_t dev_agent, hsa_executable_t executable,
-                           hsa_amd_memory_pool_t kernargs_pool,
-                           hsa_amd_memory_pool_t coarsegrained_pool,
-                           hsa_amd_memory_pool_t finegrained_pool,
-                           hsa_queue_t *queue, rpc_device_t device,
-                           const LaunchParameters &params,
-                           const char *kernel_name, args_t kernel_args,
-                           bool print_resource_usage) {
-  // Look up the kernel in the loaded executable.
-  hsa_executable_symbol_t symbol;
-  if (hsa_status_t err = hsa_executable_get_symbol_by_name(
-          executable, kernel_name, &dev_agent, &symbol))
-    return err;
-
-  // Register RPC callbacks for the malloc and free functions on HSA.
-  auto tuple = std::make_tuple(dev_agent, coarsegrained_pool);
-  rpc_register_callback(
-      device, RPC_MALLOC,
-      [](rpc_port_t port, void *data) {
-        auto malloc_handler = [](rpc_buffer_t *buffer, void *data) -> void {
-          auto &[dev_agent, pool] = *static_cast<decltype(tuple) *>(data);
-          uint64_t size = buffer->data[0];
-          void *dev_ptr = nullptr;
-          if (hsa_status_t err =
-                  hsa_amd_memory_pool_allocate(pool, size,
-                                               /*flags=*/0, &dev_ptr))
-            dev_ptr = nullptr;
-          hsa_amd_agents_allow_access(1, &dev_agent, nullptr, dev_ptr);
-          buffer->data[0] = reinterpret_cast<uintptr_t>(dev_ptr);
-        };
-        rpc_recv_and_send(port, malloc_handler, data);
-      },
-      &tuple);
-  rpc_register_callback(
-      device, RPC_FREE,
-      [](rpc_port_t port, void *data) {
-        auto free_handler = [](rpc_buffer_t *buffer, void *) {
-          if (hsa_status_t err = hsa_amd_memory_pool_free(
-                  reinterpret_cast<void *>(buffer->data[0])))
-            handle_error(err);
-        };
-        rpc_recv_and_send(port, free_handler, data);
-      },
-      nullptr);
-
-  // Retrieve different properties of the kernel symbol used for launch.
-  uint64_t kernel;
-  uint32_t args_size;
-  uint32_t group_size;
-  uint32_t private_size;
-  bool dynamic_stack;
-
-  std::pair<hsa_executable_symbol_info_t, void *> symbol_infos[] = {
-      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT, &kernel},
-      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_SIZE, &args_size},
-      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_GROUP_SEGMENT_SIZE, &group_size},
-      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_DYNAMIC_CALLSTACK, &dynamic_stack},
-      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_PRIVATE_SEGMENT_SIZE, &private_size}};
-
-  for (auto &[info, value] : symbol_infos)
-    if (hsa_status_t err = hsa_executable_symbol_get_info(symbol, info, value))
-      return err;
-
-  // Allocate space for the kernel arguments on the host and allow the GPU agent
-  // to access it.
-  void *args;
-  if (hsa_status_t err = hsa_amd_memory_pool_allocate(kernargs_pool, args_size,
-                                                      /*flags=*/0, &args))
-    handle_error(err);
-  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, args);
-
-  // Initialize all the arguments (explicit and implicit) to zero, then set the
-  // explicit arguments to the values created above.
-  std::memset(args, 0, args_size);
-  std::memcpy(args, &kernel_args, sizeof(args_t));
-
-  // Initialize the necessary implicit arguments to the proper values.
-  int dims = 1 + (params.num_blocks_y * params.num_threads_y != 1) +
-             (params.num_blocks_z * params.num_threads_z != 1);
-  implicit_args_t *implicit_args = reinterpret_cast<implicit_args_t *>(
-      reinterpret_cast<uint8_t *>(args) + sizeof(args_t));
-  implicit_args->grid_dims = dims;
-  implicit_args->grid_size_x = params.num_blocks_x;
-  implicit_args->grid_size_y = params.num_blocks_y;
-  implicit_args->grid_size_z = params.num_blocks_z;
-  implicit_args->workgroup_size_x = params.num_threads_x;
-  implicit_args->workgroup_size_y = params.num_threads_y;
-  implicit_args->workgroup_size_z = params.num_threads_z;
-
-  // Obtain a packet from the queue.
-  uint64_t packet_id = hsa_queue_add_write_index_relaxed(queue, 1);
-  while (packet_id - hsa_queue_load_read_index_scacquire(queue) >= queue->size)
-    ;
-
-  const uint32_t mask = queue->size - 1;
-  hsa_kernel_dispatch_packet_t *packet =
-      static_cast<hsa_kernel_dispatch_packet_t *>(queue->base_address) +
-      (packet_id & mask);
-
-  // Set up the packet for exeuction on the device. We currently only launch
-  // with one thread on the device, forcing the rest of the wavefront to be
-  // masked off.
-  uint16_t setup = (dims) << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS;
-  packet->workgroup_size_x = params.num_threads_x;
-  packet->workgroup_size_y = params.num_threads_y;
-  packet->workgroup_size_z = params.num_threads_z;
-  packet->reserved0 = 0;
-  packet->grid_size_x = params.num_blocks_x * params.num_threads_x;
-  packet->grid_size_y = params.num_blocks_y * params.num_threads_y;
-  packet->grid_size_z = params.num_blocks_z * params.num_threads_z;
-  packet->private_segment_size =
-      dynamic_stack ? 16 * 1024 /* 16 KB */ : private_size;
-  packet->group_segment_size = group_size;
-  packet->kernel_object = kernel;
-  packet->kernarg_address = args;
-  packet->reserved2 = 0;
-  // Create a signal to indicate when this packet has been completed.
-  if (hsa_status_t err =
-          hsa_signal_create(1, 0, nullptr, &packet->completion_signal))
-    handle_error(err);
-
-  if (print_resource_usage)
-    print_kernel_resources(kernel_name);
-
-  // Initialize the packet header and set the doorbell signal to begin execution
-  // by the HSA runtime.
-  uint16_t header =
-      1u << HSA_PACKET_HEADER_BARRIER |
-      (HSA_PACKET_TYPE_KERNEL_DISPATCH << HSA_PACKET_HEADER_TYPE) |
-      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE) |
-      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE);
-  uint32_t header_word = header | (setup << 16u);
-  __atomic_store_n((uint32_t *)&packet->header, header_word, __ATOMIC_RELEASE);
-  hsa_signal_store_relaxed(queue->doorbell_signal, packet_id);
-
-  // Wait until the kernel has completed execution on the device. Periodically
-  // check the RPC client for work to be performed on the server.
-  while (hsa_signal_wait_scacquire(
-             packet->completion_signal, HSA_SIGNAL_CONDITION_EQ, 0,
-             /*timeout_hint=*/1024, HSA_WAIT_STATE_ACTIVE) != 0)
-    if (rpc_status_t err = rpc_handle_server(device))
-      handle_error(err);
-
-  // Handle the server one more time in case the kernel exited with a pending
-  // send still in flight.
-  if (rpc_status_t err = rpc_handle_server(device))
-    handle_error(err);
-
-  // Destroy the resources acquired to launch the kernel and return.
-  if (hsa_status_t err = hsa_amd_memory_pool_free(args))
-    handle_error(err);
-  if (hsa_status_t err = hsa_signal_destroy(packet->completion_signal))
-    handle_error(err);
-
-  return HSA_STATUS_SUCCESS;
-}
-
 /// Copies data from the source agent to the destination agent. The source
 /// memory must first be pinned explicitly or allocated via HSA.
 static hsa_status_t hsa_memcpy(void *dst, hsa_agent_t dst_agent,
@@ -500,9 +327,6 @@ static hsa_status_t hsa_memcpy(void *dst, hsa_agent_t dst_agent,
 
   return HSA_STATUS_SUCCESS;
 }
-
-hsa_agent_t dev_agent;
-hsa_agent_t host_agent;
 
 void *screen_buffer;
 
@@ -624,33 +448,30 @@ static void addKeyToQueue(int pressed, unsigned int keyCode) {
 }
 
 // Function pointer the RPC implementation will call.
-static void sdl_get_input(void *args) {
-  uint32_t *key = *reinterpret_cast<uint32_t **>(args);
+static uint32_t sdl_get_input() {
+  if (s_KeyQueueReadIndex == s_KeyQueueWriteIndex)
+    return 0;
 
-  if (s_KeyQueueReadIndex == s_KeyQueueWriteIndex) {
-    *key = 0;
-  } else {
-    *key = s_KeyQueue[s_KeyQueueReadIndex];
-    s_KeyQueueReadIndex++;
-    s_KeyQueueReadIndex %= KEYQUEUE_SIZE;
-  }
+  uint32_t key = s_KeyQueue[s_KeyQueueReadIndex];
+  s_KeyQueueReadIndex++;
+  s_KeyQueueReadIndex %= KEYQUEUE_SIZE;
+  return key;
 }
 
 // Function pointer the RPC implementation will call.
-static void sdl_draw(void *args) {
-  void *buffer_ptr = *reinterpret_cast<void **>(args);
-
+static void sdl_draw(void *buffer_ptr, hsa_agent_t host_agent,
+                     hsa_agent_t dev_agent) {
   // Copy the framebuffer locally, much faster than relying on page migration.
   if (hsa_status_t err =
           hsa_memcpy(screen_buffer, host_agent, buffer_ptr, dev_agent,
                      DOOMGENERIC_RESX * DOOMGENERIC_RESY * sizeof(uint32_t)))
     handle_error(err);
 
-  SDL_UpdateTexture(texture, NULL, screen_buffer,
+  SDL_UpdateTexture(texture, nullptr, screen_buffer,
                     DOOMGENERIC_RESX * sizeof(uint32_t));
 
   SDL_RenderClear(renderer);
-  SDL_RenderCopy(renderer, texture, NULL, NULL);
+  SDL_RenderCopy(renderer, texture, nullptr, nullptr);
   SDL_RenderPresent(renderer);
 
   // Poll the events.
@@ -668,6 +489,199 @@ static void sdl_draw(void *args) {
   }
 }
 
+template <uint32_t num_lanes, typename Alloc, typename Free>
+static uint32_t handle_server(rpc::Server &server, uint32_t index,
+                              hsa_agent_t host_agent, hsa_agent_t dev_agent,
+                              Alloc &&alloc, Free &&free) {
+  auto port = server.try_open(num_lanes, index);
+  if (!port)
+    return 0;
+  index = port->get_index() + 1;
+
+  int status = rpc::RPC_SUCCESS;
+  switch (port->get_opcode()) {
+  case LIBC_MALLOC: {
+    port->recv_and_send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = reinterpret_cast<uintptr_t>(alloc(buffer->data[0]));
+    });
+    break;
+  }
+  case LIBC_FREE: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      free(reinterpret_cast<void *>(buffer->data[0]));
+    });
+    break;
+  }
+  case DOOM_DRAW_BUFFER: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      sdl_draw(reinterpret_cast<void *>(buffer->data[0]), host_agent,
+               dev_agent);
+    });
+    break;
+  }
+  case DOOM_GET_INPUT: {
+    port->recv_and_send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = sdl_get_input();
+    });
+    break;
+  }
+  default:
+    // Handle all of the `libc` specific opcodes.
+    status = handle_libc_opcodes(*port, num_lanes);
+    break;
+  }
+
+  if (status != rpc::RPC_SUCCESS)
+    handle_error("Error handling RPC server");
+
+  port->close();
+
+  return index;
+}
+
+template <typename args_t>
+hsa_status_t
+launch_kernel(hsa_agent_t host_agent, hsa_agent_t dev_agent,
+              hsa_executable_t executable, hsa_amd_memory_pool_t kernargs_pool,
+              hsa_amd_memory_pool_t coarsegrained_pool, hsa_queue_t *queue,
+              rpc::Server &server, const LaunchParameters &params,
+              const char *kernel_name, args_t kernel_args,
+              uint32_t wavefront_size, bool print_resource_usage) {
+  // Look up the kernel in the loaded executable.
+  hsa_executable_symbol_t symbol;
+  if (hsa_status_t err = hsa_executable_get_symbol_by_name(
+          executable, kernel_name, &dev_agent, &symbol))
+    return err;
+
+  // Retrieve different properties of the kernel symbol used for launch.
+  uint64_t kernel;
+  uint32_t args_size;
+  uint32_t group_size;
+  uint32_t private_size;
+  bool dynamic_stack;
+
+  std::pair<hsa_executable_symbol_info_t, void *> symbol_infos[] = {
+      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT, &kernel},
+      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_SIZE, &args_size},
+      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_GROUP_SEGMENT_SIZE, &group_size},
+      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_DYNAMIC_CALLSTACK, &dynamic_stack},
+      {HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_PRIVATE_SEGMENT_SIZE, &private_size}};
+
+  for (auto &[info, value] : symbol_infos)
+    if (hsa_status_t err = hsa_executable_symbol_get_info(symbol, info, value))
+      return err;
+
+  // Allocate space for the kernel arguments on the host and allow the GPU agent
+  // to access it.
+  void *args;
+  if (hsa_status_t err = hsa_amd_memory_pool_allocate(kernargs_pool, args_size,
+                                                      /*flags=*/0, &args))
+    handle_error(err);
+  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, args);
+
+  // Initialize all the arguments (explicit and implicit) to zero, then set the
+  // explicit arguments to the values created above.
+  std::memset(args, 0, args_size);
+  std::memcpy(args, &kernel_args, sizeof(args_t));
+
+  // Initialize the necessary implicit arguments to the proper values.
+  int dims = 1 + (params.num_blocks_y * params.num_threads_y != 1) +
+             (params.num_blocks_z * params.num_threads_z != 1);
+  implicit_args_t *implicit_args = reinterpret_cast<implicit_args_t *>(
+      reinterpret_cast<uint8_t *>(args) + sizeof(args_t));
+  implicit_args->grid_dims = dims;
+  implicit_args->grid_size_x = params.num_blocks_x;
+  implicit_args->grid_size_y = params.num_blocks_y;
+  implicit_args->grid_size_z = params.num_blocks_z;
+  implicit_args->workgroup_size_x = params.num_threads_x;
+  implicit_args->workgroup_size_y = params.num_threads_y;
+  implicit_args->workgroup_size_z = params.num_threads_z;
+
+  // Obtain a packet from the queue.
+  uint64_t packet_id = hsa_queue_add_write_index_relaxed(queue, 1);
+  while (packet_id - hsa_queue_load_read_index_scacquire(queue) >= queue->size)
+    ;
+
+  const uint32_t mask = queue->size - 1;
+  hsa_kernel_dispatch_packet_t *packet =
+      static_cast<hsa_kernel_dispatch_packet_t *>(queue->base_address) +
+      (packet_id & mask);
+
+  // Set up the packet for exeuction on the device. We currently only launch
+  // with one thread on the device, forcing the rest of the wavefront to be
+  // masked off.
+  uint16_t setup = (dims) << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS;
+  packet->workgroup_size_x = params.num_threads_x;
+  packet->workgroup_size_y = params.num_threads_y;
+  packet->workgroup_size_z = params.num_threads_z;
+  packet->reserved0 = 0;
+  packet->grid_size_x = params.num_blocks_x * params.num_threads_x;
+  packet->grid_size_y = params.num_blocks_y * params.num_threads_y;
+  packet->grid_size_z = params.num_blocks_z * params.num_threads_z;
+  packet->private_segment_size =
+      dynamic_stack ? 16 * 1024 /* 16 KB */ : private_size;
+  packet->group_segment_size = group_size;
+  packet->kernel_object = kernel;
+  packet->kernarg_address = args;
+  packet->reserved2 = 0;
+  // Create a signal to indicate when this packet has been completed.
+  if (hsa_status_t err =
+          hsa_signal_create(1, 0, nullptr, &packet->completion_signal))
+    handle_error(err);
+
+  if (print_resource_usage)
+    print_kernel_resources(kernel_name);
+
+  // Initialize the packet header and set the doorbell signal to begin execution
+  // by the HSA runtime.
+  uint16_t header =
+      1u << HSA_PACKET_HEADER_BARRIER |
+      (HSA_PACKET_TYPE_KERNEL_DISPATCH << HSA_PACKET_HEADER_TYPE) |
+      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE) |
+      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE);
+  uint32_t header_word = header | (setup << 16u);
+  __atomic_store_n((uint32_t *)&packet->header, header_word, __ATOMIC_RELEASE);
+  hsa_signal_store_relaxed(queue->doorbell_signal, packet_id);
+
+  // Wait until the kernel has completed execution on the device. Periodically
+  // check the RPC client for work to be performed on the server.
+  while (hsa_signal_wait_scacquire(packet->completion_signal,
+                                   HSA_SIGNAL_CONDITION_EQ, 0, 8192,
+                                   HSA_WAIT_STATE_ACTIVE) != 0) {
+    // Register RPC callbacks for the malloc and free functions on HSA.
+    auto malloc_handler = [&](size_t size) -> void * {
+      void *dev_ptr = nullptr;
+      if (hsa_status_t err =
+              hsa_amd_memory_pool_allocate(coarsegrained_pool, size,
+                                           /*flags=*/0, &dev_ptr))
+        dev_ptr = nullptr;
+      hsa_amd_agents_allow_access(1, &dev_agent, nullptr, dev_ptr);
+      return dev_ptr;
+    };
+
+    auto free_handler = [](void *ptr) -> void {
+      if (hsa_status_t err =
+              hsa_amd_memory_pool_free(reinterpret_cast<void *>(ptr)))
+        handle_error(err);
+    };
+
+    uint32_t index = 0;
+    if (wavefront_size == 32)
+      index = handle_server<32>(server, index, host_agent, dev_agent,
+                                malloc_handler, free_handler);
+    else
+      index = handle_server<64>(server, index, host_agent, dev_agent,
+                                malloc_handler, free_handler);
+  }
+
+  // Destroy the resources acquired to launch the kernel and return.
+  if (hsa_status_t err = hsa_amd_memory_pool_free(args))
+    handle_error(err);
+  if (hsa_status_t err = hsa_signal_destroy(packet->completion_signal))
+    handle_error(err);
+
+  return HSA_STATUS_SUCCESS;
+}
 static int load(int argc, const char **argv, const char **envp, void *image,
                 size_t size, const LaunchParameters &params,
                 bool print_resource_usage) {
@@ -686,14 +700,17 @@ static int load(int argc, const char **argv, const char **envp, void *image,
     handle_error(err);
 
   // Obtain a single agent for the device and host to use the HSA memory model.
+  hsa_agent_t dev_agent;
+  hsa_agent_t host_agent;
   if (hsa_status_t err = get_agent<HSA_DEVICE_TYPE_GPU>(&dev_agent))
     handle_error(err);
   if (hsa_status_t err = get_agent<HSA_DEVICE_TYPE_CPU>(&host_agent))
     handle_error(err);
 
   // Load the code object's ISA information and executable data segments.
-  hsa_code_object_t object;
-  if (hsa_status_t err = hsa_code_object_deserialize(image, size, "", &object))
+  hsa_code_object_reader_t reader;
+  if (hsa_status_t err =
+          hsa_code_object_reader_create_from_memory(image, size, &reader))
     handle_error(err);
 
   hsa_executable_t executable;
@@ -702,8 +719,9 @@ static int load(int argc, const char **argv, const char **envp, void *image,
           &executable))
     handle_error(err);
 
-  if (hsa_status_t err =
-          hsa_executable_load_code_object(executable, dev_agent, object, ""))
+  hsa_loaded_code_object_t object;
+  if (hsa_status_t err = hsa_executable_load_agent_code_object(
+          executable, dev_agent, reader, "", &object))
     handle_error(err);
 
   // No modifications to the executable are allowed  after this point.
@@ -717,6 +735,9 @@ static int load(int argc, const char **argv, const char **envp, void *image,
     handle_error(err);
   if (result)
     handle_error(HSA_STATUS_ERROR);
+
+  if (hsa_status_t err = hsa_code_object_reader_destroy(reader))
+    handle_error(err);
 
   // Obtain memory pools to exchange data between the host and the device. The
   // fine-grained pool acts as pinned memory on the host for DMA transfers to
@@ -744,6 +765,20 @@ static int load(int argc, const char **argv, const char **envp, void *image,
           /*flags=*/0, &screen_buffer))
     handle_error(err);
   hsa_amd_agents_allow_access(1, &dev_agent, nullptr, screen_buffer);
+
+  SDL_RenderClear(renderer);
+  SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+  SDL_RenderPresent(renderer);
+
+  // The AMDGPU target can change its wavefront size. There currently isn't a
+  // good way to look this up through the HSA API so we use the LLVM interface.
+  uint16_t abi_version;
+  llvm::StringRef image_ref(reinterpret_cast<char *>(image), size);
+  llvm::StringMap<llvm::offloading::amdgpu::AMDGPUKernelMetaData> info_map;
+  if (llvm::Error err = llvm::offloading::amdgpu::getAMDGPUMetaDataFromImage(
+          llvm::MemoryBufferRef(image_ref, ""), info_map, abi_version)) {
+    handle_error(llvm::toString(std::move(err)).c_str());
+  }
 
   // Allocate fine-grained memory on the host to hold the pointer array for the
   // copied argv and allow the GPU agent to access it.
@@ -774,40 +809,29 @@ static int load(int argc, const char **argv, const char **envp, void *image,
   hsa_amd_memory_fill(dev_ret, 0, /*count=*/1);
 
   // Allocate finegrained memory for the RPC server and client to share.
-  uint32_t wavefront_size = 0;
-  if (hsa_status_t err = hsa_agent_get_info(
-          dev_agent, HSA_AGENT_INFO_WAVEFRONT_SIZE, &wavefront_size))
-    handle_error(err);
+  uint32_t wavefront_size =
+      llvm::max_element(info_map, [](auto &&x, auto &&y) {
+        return x.second.WavefrontSize < y.second.WavefrontSize;
+      })->second.WavefrontSize;
 
   // Set up the RPC server.
-  auto tuple = std::make_tuple(dev_agent, finegrained_pool);
-  auto rpc_alloc = [](uint64_t size, void *data) {
-    auto &[dev_agent, finegrained_pool] = *static_cast<decltype(tuple) *>(data);
-    void *dev_ptr = nullptr;
-    if (hsa_status_t err = hsa_amd_memory_pool_allocate(finegrained_pool, size,
-                                                        /*flags=*/0, &dev_ptr))
-      handle_error(err);
-    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, dev_ptr);
-    return dev_ptr;
-  };
-  rpc_device_t device;
-  if (rpc_status_t err = rpc_server_init(&device, RPC_MAXIMUM_PORT_COUNT,
-                                         wavefront_size, rpc_alloc, &tuple))
+  void *rpc_buffer;
+  if (hsa_status_t err = hsa_amd_memory_pool_allocate(
+          finegrained_pool,
+          rpc::Server::allocation_size(wavefront_size, rpc::MAX_PORT_COUNT),
+          /*flags=*/0, &rpc_buffer))
     handle_error(err);
+  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, rpc_buffer);
+
+  rpc::Server server(rpc::MAX_PORT_COUNT, rpc_buffer);
+  rpc::Client client(rpc::MAX_PORT_COUNT, rpc_buffer);
 
   // Initialize the RPC client on the device by copying the local data to the
   // device's internal pointer.
   hsa_executable_symbol_t rpc_client_sym;
   if (hsa_status_t err = hsa_executable_get_symbol_by_name(
-          executable, rpc_client_symbol_name, &dev_agent, &rpc_client_sym))
+          executable, "__llvm_rpc_client", &dev_agent, &rpc_client_sym))
     handle_error(err);
-
-  void *rpc_client_host;
-  if (hsa_status_t err =
-          hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(void *),
-                                       /*flags=*/0, &rpc_client_host))
-    handle_error(err);
-  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, rpc_client_host);
 
   void *rpc_client_dev;
   if (hsa_status_t err = hsa_executable_symbol_get_info(
@@ -815,28 +839,19 @@ static int load(int argc, const char **argv, const char **envp, void *image,
           &rpc_client_dev))
     handle_error(err);
 
-  // Copy the address of the client buffer from the device to the host.
-  if (hsa_status_t err = hsa_memcpy(rpc_client_host, host_agent, rpc_client_dev,
-                                    dev_agent, sizeof(void *)))
-    handle_error(err);
-
   void *rpc_client_buffer;
   if (hsa_status_t err =
-          hsa_amd_memory_lock(const_cast<void *>(rpc_get_client_buffer(device)),
-                              rpc_get_client_size(),
+          hsa_amd_memory_lock(&client, sizeof(rpc::Client),
                               /*agents=*/nullptr, 0, &rpc_client_buffer))
     handle_error(err);
 
   // Copy the RPC client buffer to the address pointed to by the symbol.
   if (hsa_status_t err =
-          hsa_memcpy(*reinterpret_cast<void **>(rpc_client_host), dev_agent,
-                     rpc_client_buffer, host_agent, rpc_get_client_size()))
+          hsa_memcpy(rpc_client_dev, dev_agent, rpc_client_buffer, host_agent,
+                     sizeof(rpc::Client)))
     handle_error(err);
 
-  if (hsa_status_t err = hsa_amd_memory_unlock(
-          const_cast<void *>(rpc_get_client_buffer(device))))
-    handle_error(err);
-  if (hsa_status_t err = hsa_amd_memory_pool_free(rpc_client_host))
+  if (hsa_status_t err = hsa_amd_memory_unlock(&client))
     handle_error(err);
 
   // Obtain the GPU's fixed-frequency clock rate and copy it to the GPU.
@@ -845,7 +860,6 @@ static int load(int argc, const char **argv, const char **envp, void *image,
   if (HSA_STATUS_SUCCESS ==
       hsa_executable_get_symbol_by_name(executable, "__llvm_libc_clock_freq",
                                         &dev_agent, &freq_sym)) {
-
     void *host_clock_freq;
     if (hsa_status_t err =
             hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(uint64_t),
@@ -869,49 +883,6 @@ static int load(int argc, const char **argv, const char **envp, void *image,
                                         host_agent, sizeof(uint64_t)))
         handle_error(err);
     }
-
-    if (hsa_status_t err = hsa_amd_memory_pool_free(host_clock_freq))
-      handle_error(err);
-  }
-
-  void *key_buffer;
-  if (hsa_status_t err =
-          hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(uint32_t *),
-                                       /*flags=*/0, &key_buffer))
-    handle_error(err);
-  hsa_amd_agents_allow_access(1, &dev_agent, nullptr, key_buffer);
-
-  // Initialize these symbols on the GPU to control interacting with the SDL
-  // window.
-  std::pair<const char *, void *> symbols[] = {
-      {"key_buffer", reinterpret_cast<void *>(key_buffer)},
-      {"draw_framebuffer", reinterpret_cast<void *>(sdl_draw)},
-      {"get_input", reinterpret_cast<void *>(sdl_get_input)}};
-  for (auto &[string, value] : symbols) {
-    hsa_executable_symbol_t sym;
-    if (hsa_status_t err = hsa_executable_get_symbol_by_name(executable, string,
-                                                             &dev_agent, &sym))
-      handle_error(err);
-
-    void *storage;
-    if (hsa_status_t err =
-            hsa_amd_memory_pool_allocate(finegrained_pool, sizeof(void *),
-                                         /*flags=*/0, &storage))
-      handle_error(err);
-    hsa_amd_agents_allow_access(1, &dev_agent, nullptr, storage);
-    *reinterpret_cast<void **>(storage) = value;
-
-    void *addr;
-    if (hsa_status_t err = hsa_executable_symbol_get_info(
-            sym, HSA_EXECUTABLE_SYMBOL_INFO_VARIABLE_ADDRESS, &addr))
-      handle_error(err);
-
-    if (hsa_status_t err =
-            hsa_memcpy(addr, dev_agent, storage, host_agent, sizeof(void *)))
-      handle_error(err);
-
-    if (hsa_status_t err = hsa_amd_memory_pool_free(storage))
-      handle_error(err);
   }
 
   // Obtain a queue with the maximum (power of two) size, used to send commands
@@ -929,16 +900,16 @@ static int load(int argc, const char **argv, const char **envp, void *image,
   LaunchParameters single_threaded_params = {1, 1, 1, 1, 1, 1};
   begin_args_t init_args = {argc, dev_argv, dev_envp};
   if (hsa_status_t err = launch_kernel(
-          dev_agent, executable, kernargs_pool, coarsegrained_pool,
-          finegrained_pool, queue, device, single_threaded_params, "_begin.kd",
-          init_args, print_resource_usage))
+          host_agent, dev_agent, executable, kernargs_pool, coarsegrained_pool,
+          queue, server, single_threaded_params, "_begin.kd", init_args,
+          info_map["_begin"].WavefrontSize, print_resource_usage))
     handle_error(err);
 
   start_args_t args = {argc, dev_argv, dev_envp, dev_ret};
-  if (hsa_status_t err =
-          launch_kernel(dev_agent, executable, kernargs_pool,
-                        coarsegrained_pool, finegrained_pool, queue, device,
-                        params, "_start.kd", args, print_resource_usage))
+  if (hsa_status_t err = launch_kernel(
+          host_agent, dev_agent, executable, kernargs_pool, coarsegrained_pool,
+          queue, server, params, "_start.kd", args,
+          info_map["_start"].WavefrontSize, print_resource_usage))
     handle_error(err);
 
   void *host_ret;
@@ -957,14 +928,12 @@ static int load(int argc, const char **argv, const char **envp, void *image,
 
   end_args_t fini_args = {ret};
   if (hsa_status_t err = launch_kernel(
-          dev_agent, executable, kernargs_pool, coarsegrained_pool,
-          finegrained_pool, queue, device, single_threaded_params, "_end.kd",
-          fini_args, print_resource_usage))
+          host_agent, dev_agent, executable, kernargs_pool, coarsegrained_pool,
+          queue, server, single_threaded_params, "_end.kd", fini_args,
+          info_map["_end"].WavefrontSize, print_resource_usage))
     handle_error(err);
 
-  if (rpc_status_t err = rpc_server_shutdown(
-          device, [](void *ptr, void *) { hsa_amd_memory_pool_free(ptr); },
-          nullptr))
+  if (hsa_status_t err = hsa_amd_memory_pool_free(rpc_buffer))
     handle_error(err);
 
   // Free the memory allocated for the device.
@@ -979,9 +948,6 @@ static int load(int argc, const char **argv, const char **envp, void *image,
     handle_error(err);
 
   if (hsa_status_t err = hsa_executable_destroy(executable))
-    handle_error(err);
-
-  if (hsa_status_t err = hsa_code_object_destroy(object))
     handle_error(err);
 
   if (hsa_status_t err = hsa_shut_down())
@@ -1013,16 +979,6 @@ int main(int argc, const char **argv, const char **envp) {
   llvm::transform(args, std::back_inserter(new_argv),
                   [](const std::string &arg) { return arg.c_str(); });
 
-  // Claim a file lock on the executable so only a single process can enter this
-  // region if requested. This prevents the loader from spurious failures.
-  int fd = -1;
-  if (no_parallelism) {
-    fd = open(get_main_executable(argv[0]).c_str(), O_RDONLY);
-    if (flock(fd, LOCK_EX) == -1)
-      report_error(createStringError("Failed to lock '%s': %s", argv[0],
-                                     strerror(errno)));
-  }
-
   init_sdl_windows();
 
   // Drop the loader from the program arguments.
@@ -1031,12 +987,6 @@ int main(int argc, const char **argv, const char **envp) {
   int ret = load(new_argv.size(), new_argv.data(), envp,
                  const_cast<char *>(image.getBufferStart()),
                  image.getBufferSize(), params, print_resource_usage);
-
-  if (no_parallelism) {
-    if (flock(fd, LOCK_UN) == -1)
-      report_error(createStringError("Failed to unlock '%s': %s", argv[0],
-                                     strerror(errno)));
-  }
 
   return ret;
 }
