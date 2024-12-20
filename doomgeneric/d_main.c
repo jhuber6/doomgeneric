@@ -24,12 +24,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <gpuintrin.h>
 
 #include "config.h"
 #include "deh_main.h"
 #include "doomdef.h"
 #include "doomstat.h"
-#include "gpu_utils.h"
 
 #include "dstrings.h"
 #include "doomfeatures.h"
@@ -180,9 +180,9 @@ void D_Display (void)
     int				y;
 #if defined(__AMDGPU__) || defined(__NVPTX__)
     // These are shared between all threads in the block.
-    static int Local wipestart;
-    static boolean Local wipe;
-    static boolean Local done;
+    static int __gpu_local wipestart __attribute__((loader_uninitialized));
+    static boolean __gpu_local wipe __attribute__((loader_uninitialized));
+    static boolean __gpu_local done __attribute__((loader_uninitialized));
 #else
     int wipestart;
     boolean wipe;
@@ -193,7 +193,7 @@ void D_Display (void)
     if (nodrawers)
     	return;                    // for comparative timing / profiling
 		
-    if (get_thread_id() == 0) {
+    if (__gpu_thread_id(0) == 0) {
       redrawsbar = false;
       
       // change the view size if needed
@@ -307,7 +307,7 @@ void D_Display (void)
       NetUpdate ();         // send out any new accumulation
     }
 
-    sync_threads();
+    __gpu_sync_threads();
 
     // normal update
     if (!wipe)
@@ -316,14 +316,14 @@ void D_Display (void)
 	return;
     }
     
-    if (get_thread_id() == 0) {
+    if (__gpu_thread_id(0) == 0) {
       // wipe update
       wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
 
       wipestart = I_GetTime () - 1;
     }
 
-    sync_threads();
+    __gpu_sync_threads();
       do
       {
     do
@@ -333,17 +333,17 @@ void D_Display (void)
               I_Sleep(1);
     } while (tics <= 0);
           
-    if (get_thread_id() == 0) {
+    if (__gpu_thread_id(0) == 0) {
       wipestart = nowtime;
       done = wipe_ScreenWipe(wipe_Melt
                  , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
       I_UpdateNoBlit ();
       M_Drawer ();                            // menu is drawn even on top of wipes
     }
-    sync_threads();
+    __gpu_sync_threads();
     I_FinishUpdate ();                      // page flip or blit buffer
       } while (!done);
-  sync_threads();
+  __gpu_sync_threads();
 }
 
 //
@@ -422,7 +422,7 @@ boolean D_GrabMouseCallback(void)
 
 void doomgeneric_Tick()
 {
-    if (get_thread_id() == 0) {
+    if (__gpu_thread_id(0) == 0) {
       // frame syncronous IO operations
       I_StartFrame ();
 

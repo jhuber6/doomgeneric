@@ -29,7 +29,6 @@ rcsid[] = "$Id: i_x.c,v 1.6 1997/02/03 22:45:10 b1 Exp $";
 #include "config.h"
 #include "d_event.h"
 #include "d_main.h"
-#include "gpu_utils.h"
 #include "m_argv.h"
 #include "v_video.h"
 #include "z_zone.h"
@@ -40,6 +39,7 @@ rcsid[] = "$Id: i_x.c,v 1.6 1997/02/03 22:45:10 b1 Exp $";
 #include "doomgeneric.h"
 
 #include <stdbool.h>
+#include <gpuintrin.h>
 #include <stdlib.h>
 
 #if !defined(__AMDGPU__) && !defined(__NVPTX__)
@@ -161,8 +161,8 @@ void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels)
     uint32_t pix;
     uint16_t r, g, b;
 
-    uint32_t thrd_id = get_thread_id_x();
-    uint32_t thrd_count = get_num_threads_x();
+    uint32_t thrd_id = __gpu_thread_id(0);
+    uint32_t thrd_count = __gpu_num_threads(0);
     for (i = 0; i < in_pixels; i += thrd_count)
     {
         int local_id = i + thrd_id;
@@ -322,8 +322,8 @@ void I_FinishUpdate ()
         line_in += SCREENWIDTH;
     }
 
-    sync_threads();
-    if (get_thread_id() == 0)
+    __gpu_sync_threads();
+    if (__gpu_thread_id(0) == 0)
       DG_DrawFrame();
 }
 
