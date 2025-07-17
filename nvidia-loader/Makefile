@@ -1,7 +1,7 @@
 CC=clang++
-CFLAGS+= -Os -I/opt/cuda/include -I$(shell dirname $(shell which $(CC)))/../include -fno-rtti -I../doomgeneric -D_REENTRANT -g
+CFLAGS+= -Os -I/opt/cuda/include -I$(shell dirname $(shell which $(CC)))/../include -fno-rtti -I../doomgeneric -D_REENTRANT -I${LLVM_SOURCE}/libc
 LDFLAGS+=-Wl,--gc-sections -L/opt/cuda/lib -L$(shell dirname $(shell which $(CC)))/../lib
-LIBS+=-lllvmlibc_rpc_server -lcuda -lLLVMSupport -lLLVMDemangle -lLLVMObject -lLLVMTargetParser -ltinfo -lSDL2
+LIBS+=-lcuda -lLLVMSupport -lLLVMDemangle -lLLVMObject -lLLVMTargetParser -ltinfo -lSDL2
 
 # subdirectory for objects
 OBJDIR=build

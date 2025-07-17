@@ -17,7 +17,7 @@ target.
 * An AMDGPU with ROCm support
 * SDL2 libraries
 * A ROCm or ROCR-Runtime installation
-* An LLVM build off of the main branch (LLVM20 as of writing)
+* An LLVM build off of the main branch (LLVM22 as of writing)
 
 # why
 
@@ -40,19 +40,22 @@ to get the input keys and write the output framebuffer. Okay, it's not
 You will need an LLVM installation with the LLVM C library for GPUs enabled.
 Don't do a shared library build of LLVM it will probably break. See [the
 documentation](https://libc.llvm.org/gpu/building.html#standard-runtimes-build)
-for how to build it.
+for how to build it. You will need to do a build of LLVM from source as none of
+the package managers will include these libraries and we need headers that exist
+in-tree.
 
 Once installed, use the newly built `clang` compiler to build the libraries.
 Make sure that you have `include/hsa.h` and `libhsa-runtime64.so` available from
-your ROCm installation.
+your ROCm installation. Point the makefiles to your LLVM source tree for the RPC
+implementation.
 
 This currently only works with a single block / workgroup on the GPU. Logic is
 all done singe-threaded but software rendering is distributed amongst the
 threads.
 
 ```console
-$ make -C amdgpu_loader/ -j
-$ make -C doomgeneric/ -f Makefile.amdgpu -j
+$ make -C amdgpu-loader/ -j LLVM_SOURCE=/path/to/your/llvm
+$ make -C doomgeneric/ -f Makefile.amdgpu -j LLVM_SOURCE=/path/to/your/llvm
 $ ./amdgpu-loader/amdgpu-loader --threads 512 ./doomgeneric/doomgeneric -iwad doom1.wad
 ```
 
@@ -67,4 +70,6 @@ Thanks to [@hardcode84](https://github.com/hardcode84) for porting help.
 The system I tested this on has:
 * Arch Linux with kernel 6.10.5
 * AMD ATI Radeon RX 6950 XT GPU
+* NVIDIA RTX 4000 SFF Ada Generation
+* NVIDIA CUDA version 12.1
 * ROCm version 6.0

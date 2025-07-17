@@ -15,7 +15,7 @@ endif
 TRIPLE=amdgcn-amd-amdhsa
 CC=clang
 CXX=clang++
-CFLAGS+= -O1 -I$(shell dirname $(shell which $(CC)))/../include --target=$(TRIPLE) -mcpu=native -flto -nogpulib -fno-builtin-printf
+CFLAGS+= -O1 -I$(shell dirname $(shell which $(CC)))/../include --target=$(TRIPLE) -mcpu=native -flto -nogpulib -fno-builtin-printf -I${LLVM_SOURCE}/libc
 LDFLAGS+=
 CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE # -DUSEASM -DSHOWFPS
 LIBS+=-lm -lc $(shell dirname $(shell which $(CC)))/../lib/${TRIPLE}/crt1.o

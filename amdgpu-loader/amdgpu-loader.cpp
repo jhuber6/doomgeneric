@@ -37,6 +37,7 @@
 
 #include <shared/rpc.h>
 #include <shared/rpc_opcodes.h>
+#include <shared/rpc_server.h>
 
 #include <SDL2/SDL.h>
 
@@ -527,7 +528,7 @@ static uint32_t handle_server(rpc::Server &server, uint32_t index,
   }
   default:
     // Handle all of the `libc` specific opcodes.
-    status = handle_libc_opcodes(*port, num_lanes);
+    status = __llvm_libc::shared::handle_libc_opcodes(*port, num_lanes);
     break;
   }
 

@@ -1,7 +1,7 @@
 CC=clang++
-CFLAGS+= -Os -I/opt/rocm/include -I$(shell dirname $(shell which $(CC)))/../include -fno-rtti -I../doomgeneric -D_REENTRANT -g
+CFLAGS+= -Os -I/opt/rocm/include -I$(shell dirname $(shell which $(CC)))/../include -fno-rtti -I../doomgeneric -D_REENTRANT -I${LLVM_SOURCE}/libc
 LDFLAGS+=-Wl,--gc-sections -L/opt/rocm/lib -L$(shell dirname $(shell which $(CC)))/../lib
-LIBS+=-lllvmlibc_rpc_server -lhsa-runtime64 -lLLVMBinaryFormat -lLLVMObject -lLLVMAMDGPUDesc -lLLVMAMDGPUUtils -lLLVMFrontendOffloading -lLLVMSupport -lLLVMDemangle -ltinfo -lSDL2
+LIBS+= -lhsa-runtime64 -lLLVMBinaryFormat -lLLVMObject -lLLVMAMDGPUDesc -lLLVMAMDGPUUtils -lLLVMFrontendOffloading -lLLVMSupport -lLLVMDemangle -ltinfo -lSDL2
 
 # subdirectory for objects
 OBJDIR=build
