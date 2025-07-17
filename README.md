@@ -53,11 +53,16 @@ This currently only works with a single block / workgroup on the GPU. Logic is
 all done singe-threaded but software rendering is distributed amongst the
 threads.
 
+
 ```console
 $ make -C amdgpu-loader/ -j LLVM_SOURCE=/path/to/your/llvm
 $ make -C doomgeneric/ -f Makefile.amdgpu -j LLVM_SOURCE=/path/to/your/llvm
 $ ./amdgpu-loader/amdgpu-loader --threads 512 ./doomgeneric/doomgeneric -iwad doom1.wad
 ```
+
+If you try this on NVIDIA it might now work depending on how much memory the
+CUDA system allocator can provide. If you want to fix that please ask me about
+making a PR in LLVM to support NVIDIA in the LLVM libc GPU allocator!
 
 ![AMDGPU](screenshots/amdgpu.png)
 Video
